@@ -1,0 +1,33 @@
+# Local secrets
+.env
+.env.local
+.env.*.local
+
+# Logs and local runtime output
+*.log
+logs/
+downloads/
+docs/
+tmp-*
+tmp-jar-check/
+
+# IDE metadata
+.idea/
+**/.idea/
+*.iml
+.vscode/
+
+# Build and deployment artifacts
+deploy_payload/
+deploy_payload.tar.gz
+*.tar.gz
+SpringBoot/target/
+SpringBoot/storage/
+frontend/node_modules/
+frontend/dist/
+
+# Python runtime artifacts
+FastApi/.venv/
+FastApi/data/
+**/__pycache__/
+*.py[cod]
