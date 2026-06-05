@@ -224,14 +224,22 @@
             <p>登录后按企业角色进入对话、文档或平台管理。</p>
           </div>
         </div>
-        <el-form class="login-form" :model="loginForm" label-position="top" @submit.prevent="login">
+        <el-form class="login-form" :model="loginForm" label-position="top" autocomplete="off" @submit.prevent="login">
           <el-form-item label="账号">
-            <el-input v-model="loginForm.username" autocomplete="username" placeholder="admin@example.com" />
+            <el-input
+              :key="`login-username-${loginFormKey}`"
+              v-model="loginForm.username"
+              autocomplete="off"
+              name="rag-login-username"
+              placeholder="请输入账号"
+            />
           </el-form-item>
           <el-form-item label="密码">
             <el-input
+              :key="`login-password-${loginFormKey}`"
               v-model="loginForm.password"
-              autocomplete="current-password"
+              autocomplete="new-password"
+              name="rag-login-password"
               placeholder="请输入密码"
               show-password
               @keyup.enter="login"
@@ -755,6 +763,7 @@ const uploadFiles = ref([])
 const conversationMessages = reactive({})
 const streamingConversations = reactive({})
 const activeConversationKey = ref(newConversationKey())
+const loginFormKey = ref(0)
 const editingModelId = ref('')
 const userMenuOpen = ref(false)
 const chatMainRef = ref(null)
@@ -822,6 +831,9 @@ watch(
     if (nextView !== 'chat') {
       userMenuOpen.value = false
     }
+    if (nextView === 'login') {
+      resetLoginForm()
+    }
     startTaskAutoRefresh()
   }
 )
@@ -831,6 +843,7 @@ function openLogin() {
   if (session.token) {
     return
   }
+  resetLoginForm()
   view.value = 'login'
 }
 
@@ -848,8 +861,12 @@ function enterAdmin() {
 async function login() {
   loading.login = true
   try {
-    const data = await ragClient.login(loginForm)
+    const data = await ragClient.login({
+      username: loginForm.username.trim(),
+      password: loginForm.password
+    })
     await applyAuthPayload(data)
+    resetLoginForm()
     view.value = 'chat'
     resetConversation()
     ElMessage.success('登录成功')
@@ -905,6 +922,7 @@ async function applyAuthPayload(data) {
 function logout() {
   cancelActiveStreams()
   clearConversationState()
+  resetLoginForm()
   session.token = ''
   session.tenantId = ''
   session.user = null
@@ -923,6 +941,16 @@ function logout() {
   window.localStorage.removeItem('rag_user')
   setAuthContext(session)
   view.value = 'chat'
+}
+
+function resetLoginForm() {
+  loginForm.username = ''
+  loginForm.password = ''
+  loginFormKey.value += 1
+  nextTick(() => {
+    loginForm.username = ''
+    loginForm.password = ''
+  })
 }
 
 function persistSession() {
