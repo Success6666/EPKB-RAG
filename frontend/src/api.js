@@ -63,6 +63,7 @@ async function readSseStream(response, handlers = {}) {
   }
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
+  let completed = false
   const processFrame = (frame) => {
     const data = frame
       .split(/\r?\n/)
@@ -83,25 +84,36 @@ async function readSseStream(response, handlers = {}) {
     } else if (event.type === 'status') {
       handlers.onStatus?.(event.message || '', event)
     } else if (event.type === 'done') {
+      completed = true
       handlers.onDone?.(event)
     } else if (event.type === 'error') {
       throw createHttpError(event.message || '流式问答失败', event.status || 502, 'Streaming Error', event)
     }
   }
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) {
-      break
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const frames = buffer.split(/\r?\n\r?\n/)
+      buffer = frames.pop() || ''
+      for (const frame of frames) {
+        processFrame(frame)
+      }
     }
-    buffer += decoder.decode(value, { stream: true })
-    const frames = buffer.split(/\r?\n\r?\n/)
-    buffer = frames.pop() || ''
-    for (const frame of frames) {
-      processFrame(frame)
+  } catch (error) {
+    if (completed) {
+      return
     }
+    throw error
   }
   if (buffer.trim()) {
     processFrame(buffer)
+  }
+  if (!completed) {
+    throw createHttpError('流式连接已中断，请重试', 502, 'Streaming Interrupted')
   }
 }
 
