@@ -110,12 +110,25 @@ class OllamaGenerationClient:
             context_window_tokens,
             deep_thinking,
         )
+        recovery_prompt = final_answer_recovery_prompt(
+            build_generation_prompt(
+                query,
+                hits,
+                history,
+                runtime_context,
+                context_summary,
+                context_compressed,
+                token_budget,
+                context_window_tokens,
+                False,
+            )
+        )
         if route["provider"] == "ollama":
-            async for chunk in self._stream_ollama(route, prompt, temperature, top_p, deep_thinking):
+            async for chunk in self._stream_ollama(route, prompt, recovery_prompt, temperature, top_p, deep_thinking):
                 yield chunk
             return
 
-        async for chunk in self._stream_openai_compatible(route, prompt, temperature, top_p, deep_thinking):
+        async for chunk in self._stream_openai_compatible(route, prompt, recovery_prompt, temperature, top_p, deep_thinking):
             yield chunk
 
     async def rewrite_query(
@@ -180,6 +193,7 @@ class OllamaGenerationClient:
         self,
         route: dict[str, str | None],
         prompt: str,
+        recovery_prompt: str,
         temperature: float | None,
         top_p: float | None,
         deep_thinking: bool,
@@ -195,6 +209,7 @@ class OllamaGenerationClient:
 
         timeout = httpx.Timeout(self.timeout, connect=5.0)
         parser = ThinkingTagParser(emit_reasoning=deep_thinking)
+        emitted_answer = False
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{route['base_url']}/api/generate", json=payload) as response:
                 response.raise_for_status()
@@ -205,9 +220,14 @@ class OllamaGenerationClient:
                     token = chunk.get("response") or ""
                     if token:
                         for item in parser.feed(token):
+                            emitted_answer = emitted_answer or is_answer_chunk(item)
                             yield item
                 for item in parser.flush():
+                    emitted_answer = emitted_answer or is_answer_chunk(item)
                     yield item
+        if not emitted_answer:
+            async for item in self._recover_answer_stream(route, recovery_prompt, temperature, top_p):
+                yield item
 
     async def _complete_ollama(
         self,
@@ -235,6 +255,7 @@ class OllamaGenerationClient:
         self,
         route: dict[str, str | None],
         prompt: str,
+        recovery_prompt: str,
         temperature: float | None,
         top_p: float | None,
         deep_thinking: bool,
@@ -255,6 +276,7 @@ class OllamaGenerationClient:
         for attempt in range(3):
             try:
                 parser = ThinkingTagParser(emit_reasoning=deep_thinking)
+                emitted_answer = False
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream("POST", url, json=payload, headers=headers) as response:
                         response.raise_for_status()
@@ -273,14 +295,38 @@ class OllamaGenerationClient:
                             token = delta.get("content") or choice.get("text") or ""
                             if token:
                                 for item in parser.feed(token):
+                                    emitted_answer = emitted_answer or is_answer_chunk(item)
                                     yield item
                         for item in parser.flush():
+                            emitted_answer = emitted_answer or is_answer_chunk(item)
                             yield item
+                if not emitted_answer:
+                    async for item in self._recover_answer_stream(route, recovery_prompt, temperature, top_p):
+                        yield item
                 return
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 if attempt == 2:
                     raise
                 await asyncio.sleep(0.25 * (attempt + 1))
+
+    async def _recover_answer_stream(
+        self,
+        route: dict[str, str | None],
+        prompt: str,
+        temperature: float | None,
+        top_p: float | None,
+    ) -> AsyncIterator[dict[str, str]]:
+        if not prompt:
+            return
+        if route["provider"] == "ollama":
+            text = await self._complete_ollama(route, prompt, temperature, top_p)
+        else:
+            text = await self._complete_openai_compatible(route, prompt, temperature, top_p)
+        answer = final_answer_text(text)
+        if not answer:
+            return
+        for chunk in text_deltas(answer):
+            yield {"type": "delta", "text": chunk}
 
     async def _complete_openai_compatible(
         self,
@@ -395,6 +441,44 @@ def generation_options(temperature: float | None, top_p: float | None) -> dict[s
     if top_p is not None:
         options["top_p"] = top_p
     return options
+
+
+def is_answer_chunk(item: dict[str, str]) -> bool:
+    return item.get("type") == "delta" and bool(str(item.get("text") or "").strip())
+
+
+def final_answer_recovery_prompt(prompt: str) -> str:
+    return (
+        f"{prompt}\n\n"
+        "Important: Return only the final answer in normal answer text. "
+        "Do not include <think> tags, hidden reasoning, analysis notes, or a reasoning-only response. "
+        "If the retrieved context is insufficient, say that directly as the final answer."
+    )
+
+
+def final_answer_text(text: str) -> str:
+    value = strip_thinking_blocks(str(text or ""))
+    return value.strip()
+
+
+def strip_thinking_blocks(text: str) -> str:
+    value = str(text or "")
+    while True:
+        lowered = value.lower()
+        start = lowered.find(ThinkingTagParser.OPEN)
+        if start < 0:
+            return value
+        end = lowered.find(ThinkingTagParser.CLOSE, start + len(ThinkingTagParser.OPEN))
+        if end < 0:
+            value = value[:start]
+            continue
+        value = value[:start] + value[end + len(ThinkingTagParser.CLOSE):]
+
+
+def text_deltas(value: str, size: int = 16):
+    text = str(value or "")
+    for index in range(0, len(text), size):
+        yield text[index:index + size]
 
 
 def split_model(provider: str | None, model: str | None) -> tuple[str | None, str | None]:

@@ -56,9 +56,10 @@ def compact_text(value: str, limit: int) -> str:
 def format_thinking_mode(deep_thinking: bool) -> str:
     if deep_thinking:
         return (
-            "enabled. If your runtime exposes a reasoning channel, put a concise visible reasoning summary there. "
-            "For plain text-only models, start with a short <think>...</think> block that summarizes evidence checks, "
-            "then put the final answer outside that block. Do not include hidden private chain-of-thought details."
+            "enabled. If your runtime exposes a separate reasoning channel, put a concise visible evidence-check "
+            "summary there. Do not put <think> blocks in normal text. If there is no separate reasoning channel, "
+            "skip visible reasoning and emit the final answer normally. The final answer must always be in the "
+            "normal answer content."
         )
     return "disabled. Do not include <think> blocks or visible reasoning in the final answer."
 
