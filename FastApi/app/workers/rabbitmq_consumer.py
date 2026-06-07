@@ -9,6 +9,7 @@ import aio_pika
 from pydantic import ValidationError
 
 from app.core.config import get_settings
+from app.core.runtime_gc import collect_runtime_memory, start_periodic_gc, stop_periodic_gc
 from app.schemas.documents import DocumentIngestJob
 from app.services.factory import get_ingestion_service, get_java_callback, get_mysql_repository
 from app.langchain_modules.retrieval.vector_store import KnowledgeBaseScope
@@ -233,6 +234,9 @@ class RabbitDocumentConsumer:
                 await self._nack(message, requeue=True)
                 return
             await self._nack(message, requeue=False)
+        finally:
+            if self.settings.runtime_gc_enabled:
+                await asyncio.to_thread(collect_runtime_memory, self.settings)
 
     async def _notify_success(self, callback: Any, job: DocumentIngestJob, response: Any) -> None:
         try:
@@ -290,7 +294,12 @@ def main() -> None:
                 loop.add_signal_handler(sig, consumer.request_stop)
             except NotImplementedError:
                 signal.signal(sig, lambda signum, frame: loop.call_soon_threadsafe(consumer.request_stop))
-        await consumer.start()
+        gc_task = start_periodic_gc(consumer.settings)
+        try:
+            await consumer.start()
+        finally:
+            await stop_periodic_gc(gc_task)
+            collect_runtime_memory(consumer.settings)
 
     def handle_signal(signum: int, frame: Any) -> None:
         del signum, frame

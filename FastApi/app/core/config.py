@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     app_name: str = "Enterprise Private Knowledge Base RAG"
     app_version: str = "0.1.0"
     api_prefix: str = "/api/v1"
+    runtime_gc_enabled: bool = True
+    runtime_gc_interval_seconds: int = 300
+    runtime_malloc_trim_enabled: bool = True
+    runtime_gc_log_enabled: bool = False
 
     upload_dir: str = "./data/uploads"
     chroma_persist_dir: str = "./data/chroma"
