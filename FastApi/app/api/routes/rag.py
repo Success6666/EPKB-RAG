@@ -13,6 +13,8 @@ from app.services.factory import get_retrieval_service
 router = APIRouter(prefix="/rag", tags=["rag"])
 logger = logging.getLogger(__name__)
 
+NO_RELIABLE_EVIDENCE_ANSWER = "知识库中没有检索到足够可靠的内容，请补充文档或降低引用阈值后重试。"
+
 
 @router.post("/query", response_model=RetrievalResponse)
 async def query_rag(request: RetrievalQuery) -> RetrievalResponse:
@@ -66,12 +68,12 @@ async def ask_chat(request: ChatAskRequest) -> ChatAskResponse:
             title=hit.citation.file_name or hit.citation.doc_id or "unknown",
             page=hit.citation.page,
             score=round(hit.score, 4),
-            text=hit.text,
+            text=chat_citation_text(hit),
         )
         for hit in response.hits
         if hit.score >= request.score_threshold
     ]
-    answer = response.answer or "知识库中没有检索到足够可靠的内容，请补充文档或降低引用阈值后重试。"
+    answer = response.answer or no_answer_fallback_answer(response.hits, request.score_threshold)
     if response.warnings:
         answer = "\n".join([f"检索提示：{warning}" for warning in response.warnings] + ["", answer])
     return ChatAskResponse(
@@ -214,7 +216,12 @@ async def ask_chat_stream(request: ChatAskRequest) -> StreamingResponse:
                     await asyncio.sleep(0)
             answer = "".join(answer_parts).strip()
             if not answer:
-                answer = "知识库中没有检索到足够可靠的内容，请补充文档或降低引用阈值后重试。"
+                answer = no_answer_fallback_answer(trusted_hits, request.score_threshold)
+                if trusted_hits:
+                    yield sse_event(
+                        "status",
+                        {"type": "status", "sessionId": request.session_id, "message": "模型未返回正文，正在返回检索证据摘要..."},
+                    )
                 for delta in text_chunks(answer):
                     yield sse_event("delta", {"type": "delta", "sessionId": request.session_id, "delta": delta})
                     await asyncio.sleep(0)
@@ -248,11 +255,19 @@ def chat_citations(hits, score_threshold: float) -> list[ChatCitation]:
             title=hit.citation.file_name or hit.citation.doc_id or "unknown",
             page=hit.citation.page,
             score=round(hit.score, 4),
-            text=hit.text,
+            text=chat_citation_text(hit),
         )
         for hit in hits
         if hit.score >= score_threshold
     ]
+
+
+def chat_citation_text(hit, limit: int = 1200) -> str:
+    text = " ".join(str(hit.text or "").split())
+    if len(text) <= limit:
+        return text
+    suffix = "..." if not hit.metadata.get("full_document_context") else "...（完整样本已用于生成上下文，引用区仅显示摘要）"
+    return text[:limit].rstrip() + suffix
 
 
 def sse_event(event_type: str, payload: dict) -> str:
@@ -262,6 +277,20 @@ def sse_event(event_type: str, payload: dict) -> str:
 def text_chunks(value: str, size: int = 8):
     for index in range(0, len(value), size):
         yield value[index:index + size]
+
+
+def no_answer_fallback_answer(hits, score_threshold: float) -> str:
+    usable_hits = [hit for hit in hits if hit.score >= score_threshold]
+    if not usable_hits:
+        return NO_RELIABLE_EVIDENCE_ANSWER
+    lines = [
+        "已检索到可用于回答的知识库证据，但模型本次没有生成可用正文。下面先返回检索证据摘要：",
+    ]
+    for index, hit in enumerate(usable_hits[:3], start=1):
+        title = hit.citation.file_name or hit.citation.doc_id or "未知来源"
+        preview = " ".join(str(hit.text or "").split())[:180]
+        lines.append(f"{index}. {title}（相关度 {hit.score:.3f}）：{preview}")
+    return "\n".join(lines)
 
 
 def generation_fallback_answer(hits, exc: Exception) -> str:
