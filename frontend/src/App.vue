@@ -154,7 +154,7 @@
                   <span>{{ message.statusText }}</span>
                 </div>
                 <div
-                  v-if="message.role === 'assistant' && message.content"
+                  v-if="message.role === 'assistant' && message.content && !message.streaming"
                   class="markdown-body"
                   v-html="renderMarkdown(message.content)"
                 ></div>
@@ -713,7 +713,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import {
   ArrowUp,
   Cpu,

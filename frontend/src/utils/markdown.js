@@ -7,6 +7,8 @@ const markdown = new MarkdownIt({
   linkify: true,
   typographer: true
 })
+const renderCache = new Map()
+const MAX_RENDER_CACHE_ITEMS = 100
 
 const defaultLinkOpenRenderer = markdown.renderer.rules.link_open
 
@@ -30,9 +32,21 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, self) => {
 }
 
 export function renderMarkdown(value) {
-  const raw = markdown.render(String(value || ''))
-  return DOMPurify.sanitize(raw, {
+  const source = String(value || '')
+  const cached = renderCache.get(source)
+  if (cached !== undefined) {
+    renderCache.delete(source)
+    renderCache.set(source, cached)
+    return cached
+  }
+  const raw = markdown.render(source)
+  const rendered = DOMPurify.sanitize(raw, {
     ALLOWED_ATTR: ['href', 'target', 'rel', 'class'],
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i
   })
+  renderCache.set(source, rendered)
+  while (renderCache.size > MAX_RENDER_CACHE_ITEMS) {
+    renderCache.delete(renderCache.keys().next().value)
+  }
+  return rendered
 }

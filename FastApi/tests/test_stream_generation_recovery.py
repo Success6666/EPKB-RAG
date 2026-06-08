@@ -45,6 +45,33 @@ class StreamGenerationRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_answer_text("<think>检查证据</think>\n最终答案"), "最终答案")
 
 
+    def test_generation_chain_cache_evicts_least_recent_route(self):
+        client = CacheClient(
+            Settings(generation_provider="ollama", ollama_generation_model="default", generation_chain_cache_max_items=2)
+        )
+
+        client.chain(model="model-a")
+        client.chain(model="model-b")
+        client.chain(model="model-a")
+        client.chain(model="model-c")
+
+        cached_models = [key[1] for key in client._chains.keys()]
+        self.assertEqual(cached_models, ["model-a", "model-c"])
+
+
+class CacheClient(OllamaGenerationClient):
+    def _create_chain(self, route, temperature, top_p):
+        return FakeChain(route["model"])
+
+
+class FakeChain:
+    def __init__(self, model):
+        self.model = model
+
+    def run(self, *args, **kwargs):
+        return ""
+
+
 class RecoveringClient(OllamaGenerationClient):
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)

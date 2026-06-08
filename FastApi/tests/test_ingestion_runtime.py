@@ -1,11 +1,13 @@
 import importlib
 import importlib.util
 import unittest
+from unittest.mock import patch
 
 from app.core.config import Settings
 from app.langchain_modules.model_io.embeddings import NvidiaEmbeddingProvider
 from app.langchain_modules.retrieval.vector_store import batched as vector_batches, milvus_search_params
 from app.schemas.documents import DocumentIngestJob
+from app.services import factory
 from app.services.java_callback import JavaDocumentStatusCallback
 from app.services.mysql_repository import batched as mysql_batches, mysql_connection_kwargs
 
@@ -63,6 +65,33 @@ class IngestionBatchingTests(unittest.TestCase):
 
         self.assertEqual(params["metric_type"], "L2")
         self.assertEqual(params["params"]["ef"], 376)
+
+    def test_dynamic_vector_store_cache_evicts_least_recent_config(self):
+        settings = Settings(dynamic_vector_store_cache_max_items=2)
+        created = []
+
+        def fake_create_vector_store(scoped_settings, embedding_provider):
+            store = {"model": scoped_settings.nvidia_embedding_model}
+            created.append(store)
+            return store
+
+        factory._dynamic_vector_stores.clear()
+        with (
+            patch.object(factory, "get_settings", return_value=settings),
+            patch.object(factory, "create_embedding_provider", side_effect=lambda scoped_settings: object()),
+            patch.object(factory, "create_vector_store", side_effect=fake_create_vector_store),
+        ):
+            first = factory.resolve_vector_store_from_embedding_config("nvidia", "model-a", None, None, None)
+            factory.resolve_vector_store_from_embedding_config("nvidia", "model-b", None, None, None)
+
+            self.assertIs(first, factory.resolve_vector_store_from_embedding_config("nvidia", "model-a", None, None, None))
+
+            factory.resolve_vector_store_from_embedding_config("nvidia", "model-c", None, None, None)
+
+        cached_models = [key[1] for key in factory._dynamic_vector_stores.keys()]
+        self.assertEqual(cached_models, ["model-a", "model-c"])
+        self.assertEqual([item["model"] for item in created], ["model-a", "model-b", "model-c"])
+        factory._dynamic_vector_stores.clear()
 
 
 class NvidiaEmbeddingBatchingTests(unittest.TestCase):

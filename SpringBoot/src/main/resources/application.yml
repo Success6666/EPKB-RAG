@@ -45,6 +45,14 @@ spring:
       max-file-size: 100MB
       max-request-size: 120MB
   ai:
+    model:
+      chat: ${SPRING_AI_MODEL_CHAT:none}
+      embedding: ${SPRING_AI_MODEL_EMBEDDING:none}
+      image: ${SPRING_AI_MODEL_IMAGE:none}
+      audio:
+        speech: ${SPRING_AI_MODEL_AUDIO_SPEECH:none}
+        transcription: ${SPRING_AI_MODEL_AUDIO_TRANSCRIPTION:none}
+      moderation: ${SPRING_AI_MODEL_MODERATION:none}
     openai:
       api-key: ${OPENAI_API_KEY:}
       chat:

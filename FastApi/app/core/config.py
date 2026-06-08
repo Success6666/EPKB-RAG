@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Enterprise Private Knowledge Base RAG"
-    app_version: str = "0.1.0"
+    app_version: str = "0.1.8"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     internal_api_token: str | None = None
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     chroma_persist_dir: str = "./data/chroma"
     vector_store: str = Field(default="chroma", description="chroma, milvus, or milvus_with_keyword_fallback")
+    dynamic_vector_store_cache_max_items: int = 16
 
     milvus_uri: str = "http://localhost:19530"
     milvus_token: str | None = None
@@ -40,6 +41,7 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_generation_model: str = "qwen2.5:7b"
     ollama_timeout_seconds: int = 120
+    generation_chain_cache_max_items: int = 16
     nvidia_api_key: str | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_embedding_model: str = "nvidia/nv-embedqa-e5-v5"

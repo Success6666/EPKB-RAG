@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from functools import lru_cache
 
 from app.core.config import get_settings
@@ -13,7 +14,7 @@ from app.schemas.documents import DocumentIngestJob
 from app.schemas.rag import RetrievalQuery
 
 
-_dynamic_vector_stores: dict[tuple[str, str, str, str, str], VectorStore] = {}
+_dynamic_vector_stores: OrderedDict[tuple[str, str, str, str, str], VectorStore] = OrderedDict()
 
 
 @lru_cache
@@ -87,6 +88,14 @@ def resolve_vector_store_from_embedding_config(
         key = (provider, model, base_url, truncate, api_key or "")
     else:
         raise ValueError(f"Unsupported embedding provider: {embedding_provider}")
+    cached = _dynamic_vector_stores.get(key)
+    if cached is not None:
+        _dynamic_vector_stores.move_to_end(key)
+        return cached
+
+    max_items = max(1, settings.dynamic_vector_store_cache_max_items)
+    while len(_dynamic_vector_stores) >= max_items:
+        _dynamic_vector_stores.popitem(last=False)
     if key not in _dynamic_vector_stores:
         _dynamic_vector_stores[key] = create_vector_store(scoped_settings, create_embedding_provider(scoped_settings))
     return _dynamic_vector_stores[key]

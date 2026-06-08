@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections import OrderedDict
 from hashlib import sha256
 from typing import Any, AsyncIterator
 
@@ -28,7 +29,9 @@ class OllamaGenerationClient:
         self.base_url = settings.ollama_base_url.rstrip("/")
         self.model = settings.ollama_generation_model
         self.timeout = settings.ollama_timeout_seconds
-        self._chains: dict[tuple[str | None, str | None, str | None, bool, float | None, float | None], Any] = {}
+        self._chains: OrderedDict[
+            tuple[str | None, str | None, str | None, bool, float | None, float | None], Any
+        ] = OrderedDict()
 
     def chain(
         self,
@@ -41,14 +44,25 @@ class OllamaGenerationClient:
     ):
         route = self._resolve_route(provider, model, base_url, api_key)
         key = (route["provider"], route["model"], route["base_url"], key_fingerprint(route["api_key"]), temperature, top_p)
-        if key not in self._chains:
-            from langchain.chains import LLMChain
-            from langchain.prompts import PromptTemplate
+        cached = self._chains.get(key)
+        if cached is not None:
+            self._chains.move_to_end(key)
+            return cached
 
-            prompt = PromptTemplate.from_template(GENERATION_PROMPT_TEMPLATE)
-            llm = self._create_llm(route, temperature, top_p)
-            self._chains[key] = LLMChain(llm=llm, prompt=prompt)
+        max_items = max(1, self.settings.generation_chain_cache_max_items)
+        while len(self._chains) >= max_items:
+            self._chains.popitem(last=False)
+
+        self._chains[key] = self._create_chain(route, temperature, top_p)
         return self._chains[key]
+
+    def _create_chain(self, route: dict[str, str | None], temperature: float | None, top_p: float | None):
+        from langchain.chains import LLMChain
+        from langchain.prompts import PromptTemplate
+
+        prompt = PromptTemplate.from_template(GENERATION_PROMPT_TEMPLATE)
+        llm = self._create_llm(route, temperature, top_p)
+        return LLMChain(llm=llm, prompt=prompt)
 
     def generate(
         self,

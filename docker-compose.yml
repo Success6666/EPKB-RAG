@@ -164,6 +164,12 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_GENERATION_MODEL:-qwen2.5:7b}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SPRING_AI_MODEL_CHAT: ${SPRING_AI_MODEL_CHAT:-none}
+      SPRING_AI_MODEL_EMBEDDING: ${SPRING_AI_MODEL_EMBEDDING:-none}
+      SPRING_AI_MODEL_IMAGE: ${SPRING_AI_MODEL_IMAGE:-none}
+      SPRING_AI_MODEL_AUDIO_SPEECH: ${SPRING_AI_MODEL_AUDIO_SPEECH:-none}
+      SPRING_AI_MODEL_AUDIO_TRANSCRIPTION: ${SPRING_AI_MODEL_AUDIO_TRANSCRIPTION:-none}
+      SPRING_AI_MODEL_MODERATION: ${SPRING_AI_MODEL_MODERATION:-none}
       JAVA_CALLBACK_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
@@ -174,7 +180,7 @@ services:
       JAVA_OPTS: "${JAVA_OPTS:--Xms128m -Xmx384m -XX:+UseContainerSupport -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:InitiatingHeapOccupancyPercent=30 -XX:+UseStringDeduplication -XX:+ExitOnOutOfMemoryError -Djava.security.egd=file:/dev/urandom}"
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${SPRINGBOOT_PORT:-8080}:8080"
+      - "${SPRINGBOOT_BIND_HOST:-127.0.0.1}:${SPRINGBOOT_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD-SHELL", "grep -qi ':1F90 .* 0A ' /proc/net/tcp || { test -r /proc/net/tcp6 && grep -qi ':1F90 .* 0A ' /proc/net/tcp6; }"]
       interval: 10s
@@ -218,7 +224,7 @@ services:
       RUNTIME_GC_INTERVAL_SECONDS: ${RUNTIME_GC_INTERVAL_SECONDS:-300}
       RUNTIME_MALLOC_TRIM_ENABLED: ${RUNTIME_MALLOC_TRIM_ENABLED:-true}
       RUNTIME_GC_LOG_ENABLED: ${RUNTIME_GC_LOG_ENABLED:-false}
-      MYSQL_DSN: ${MYSQL_DSN:?Set MYSQL_DSN in .env}
+      MYSQL_DSN: ${MYSQL_DSN:-${APP_MYSQL_DSN:?Set MYSQL_DSN or APP_MYSQL_DSN in .env}}
       JAVA_CALLBACK_BASE_URL: http://springboot:8080
       JAVA_CALLBACK_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
       INTERNAL_API_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
@@ -276,9 +282,17 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DYNAMIC_VECTOR_STORE_CACHE_MAX_ITEMS: ${DYNAMIC_VECTOR_STORE_CACHE_MAX_ITEMS:-16}
+      GENERATION_CHAIN_CACHE_MAX_ITEMS: ${GENERATION_CHAIN_CACHE_MAX_ITEMS:-16}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "${FASTAPI_BIND_HOST:-127.0.0.1}:${FASTAPI_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 30s
     volumes:
       - ./FastApi:/app
       - shared_uploads:/data/uploads
@@ -317,7 +331,7 @@ services:
       RUNTIME_GC_INTERVAL_SECONDS: ${RUNTIME_GC_INTERVAL_SECONDS:-300}
       RUNTIME_MALLOC_TRIM_ENABLED: ${RUNTIME_MALLOC_TRIM_ENABLED:-true}
       RUNTIME_GC_LOG_ENABLED: ${RUNTIME_GC_LOG_ENABLED:-false}
-      MYSQL_DSN: ${MYSQL_DSN:?Set MYSQL_DSN in .env}
+      MYSQL_DSN: ${MYSQL_DSN:-${APP_MYSQL_DSN:?Set MYSQL_DSN or APP_MYSQL_DSN in .env}}
       JAVA_CALLBACK_BASE_URL: http://springboot:8080
       JAVA_CALLBACK_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
       INTERNAL_API_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
@@ -377,6 +391,8 @@ services:
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DYNAMIC_VECTOR_STORE_CACHE_MAX_ITEMS: ${DYNAMIC_VECTOR_STORE_CACHE_MAX_ITEMS:-16}
+      GENERATION_CHAIN_CACHE_MAX_ITEMS: ${GENERATION_CHAIN_CACHE_MAX_ITEMS:-16}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./FastApi:/app
@@ -401,12 +417,14 @@ services:
     restart: unless-stopped
     profiles: ["app"]
     ports:
-      - "${FRONTEND_PORT:-3000}:80"
+      - "${FRONTEND_BIND_HOST:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"
     volumes:
       - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - springboot
-      - fastapi
+      springboot:
+        condition: service_healthy
+      fastapi:
+        condition: service_healthy
     networks:
       - rag-net
 
