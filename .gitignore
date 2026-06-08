@@ -11,6 +11,14 @@ docs/
 tmp-*
 tmp-jar-check/
 
+# Local document/render experiments
+.pydeps_pdf/
+pdf_review_render/
+resume_render_png/
+resume_render_compact_png/
+resume_word_export/
+build_resume_*.py
+
 # IDE metadata
 .idea/
 **/.idea/
@@ -29,5 +37,6 @@ frontend/dist/
 # Python runtime artifacts
 FastApi/.venv/
 FastApi/data/
+FastApi/eval/*.tmp.*
 **/__pycache__/
 *.py[cod]

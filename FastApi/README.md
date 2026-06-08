@@ -160,7 +160,10 @@ python tools/evaluate_retrieval.py `
   --gold eval/samples/retrieval_gold_sample.jsonl `
   --results eval/samples/retrieval_results_sample.jsonl `
   --output eval/retrieval_report.json `
-  --failures eval/retrieval_failures.csv
+  --failures eval/retrieval_failures.csv `
+  --failure-jsonl eval/retrieval_failures.jsonl `
+  --fail-under recall@5=0.85 `
+  --fail-under mrr=0.70
 ```
 
 直接调用正在运行的 FastAPI 评测：
@@ -173,7 +176,20 @@ python tools/evaluate_retrieval.py `
   --top-k 40 `
   --mode hybrid `
   --output eval/retrieval_report.json `
-  --failures eval/retrieval_failures.csv
+  --failures eval/retrieval_failures.csv `
+  --failure-jsonl eval/retrieval_failures.jsonl
+```
+
+`--fail-under` 会在指标低于阈值时返回非 0 退出码，适合放到发布前检查或 CI；`--failure-jsonl`
+会保留漏召回/误召回问题的期望文档、Top hits、分数和证据预览，方便定位是哪类问题拖低召回。
+
+运行中的 FastAPI 端到端烟测：
+```powershell
+cd E:\AI\FastApi
+python tools/smoke_rag_e2e.py `
+  --base-url http://localhost:8000 `
+  --tenant-id smoke-tenant `
+  --kb-id smoke-kb
 ```
 
 gold set 每行建议包含：

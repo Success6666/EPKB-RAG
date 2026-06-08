@@ -160,15 +160,49 @@
                 ></div>
                 <p v-else-if="message.content">{{ message.content }}</p>
                 <div v-if="message.citations?.length" class="citation-panel">
-                  <button
-                    v-for="citation in message.citations"
-                    :key="citation.id"
-                    type="button"
-                    class="citation-chip"
-                    :title="citation.text"
+                  <div v-if="message.trace" class="trace-summary">
+                    <span>{{ formatTraceSummary(message.trace) }}</span>
+                  </div>
+                  <details
+                    v-for="(citation, citationIndex) in message.citations"
+                    :key="citation.id || citation.chunkId || citationIndex"
+                    class="citation-item"
                   >
-                    {{ citation.title }}<span v-if="citation.page"> p.{{ citation.page }}</span>
-                  </button>
+                    <summary class="citation-summary">
+                      <span class="citation-title">{{ citation.title || citation.docId || 'unknown' }}</span>
+                      <span v-if="citation.page" class="citation-meta">p.{{ citation.page }}</span>
+                      <span class="citation-score">{{ formatScore(citation.score) }}</span>
+                    </summary>
+                    <div class="citation-detail">
+                      <p class="citation-text">{{ citation.text }}</p>
+                      <dl class="citation-fields">
+                        <div v-if="citation.docId">
+                          <dt>Doc</dt>
+                          <dd>{{ citation.docId }}</dd>
+                        </div>
+                        <div v-if="citation.chunkId || citation.id">
+                          <dt>Chunk</dt>
+                          <dd>{{ citation.chunkId || citation.id }}</dd>
+                        </div>
+                        <div v-if="citation.kbId">
+                          <dt>KB</dt>
+                          <dd>{{ citation.kbId }}</dd>
+                        </div>
+                        <div v-if="citation.vectorScore !== null && citation.vectorScore !== undefined">
+                          <dt>Vector</dt>
+                          <dd>{{ formatScore(citation.vectorScore) }}</dd>
+                        </div>
+                        <div v-if="citation.keywordScore !== null && citation.keywordScore !== undefined">
+                          <dt>Keyword</dt>
+                          <dd>{{ formatScore(citation.keywordScore) }}</dd>
+                        </div>
+                        <div v-if="citation.metadata?.retrieval_strategy">
+                          <dt>Strategy</dt>
+                          <dd>{{ citation.metadata.retrieval_strategy }}</dd>
+                        </div>
+                      </dl>
+                    </div>
+                  </details>
                 </div>
               </div>
             </article>
@@ -1460,6 +1494,7 @@ async function askQuestion() {
     role: 'assistant',
     content: '',
     citations: [],
+    trace: null,
     streaming: true,
     deepThinking: requestDeepThinking,
     reasoning: '',
@@ -1565,7 +1600,8 @@ async function askQuestion() {
         const key = event?.sessionId ? conversationKey(event.sessionId) : activeConversationKey.value
         patchConversationMessage(key, assistantMessageId, (message) => {
           message.content = event.answer || message.content
-          message.citations = event.citations || []
+          message.citations = normalizeCitations(event.citations || [])
+          message.trace = event.trace || null
           message.streaming = false
           message.reasoningStreaming = false
           message.statusText = ''
@@ -1875,6 +1911,7 @@ function toDisplayMessage(message) {
     role: message.role,
     content: message.content,
     citations: parseCitations(message.citationsJson),
+    trace: message.trace || null,
     deepThinking: false,
     reasoning: '',
     reasoningOpen: false,
@@ -1901,14 +1938,74 @@ function parseCitations(value) {
     return []
   }
   if (Array.isArray(value)) {
-    return value
+    return normalizeCitations(value)
   }
   try {
     const parsed = JSON.parse(value)
-    return Array.isArray(parsed) ? parsed : []
+    return Array.isArray(parsed) ? normalizeCitations(parsed) : []
   } catch {
     return []
   }
+}
+
+function normalizeCitations(citations) {
+  return (citations || []).map((citation) => {
+    const metadata = safeCitationMetadata(citation.metadata || {})
+    return {
+      ...citation,
+      id: citation.id || citation.chunkId || citation.chunk_id || metadata.chunk_id || '',
+      title: citation.title || citation.fileName || citation.docId || metadata.doc_id || 'unknown',
+      docId: citation.docId || citation.doc_id || metadata.doc_id || '',
+      chunkId: citation.chunkId || citation.chunk_id || citation.id || metadata.chunk_id || '',
+      kbId: citation.kbId || citation.kb_id || metadata.kb_id || '',
+      sourceUri: citation.sourceUri || citation.source_uri || '',
+      vectorScore: citation.vectorScore ?? citation.vector_score ?? null,
+      keywordScore: citation.keywordScore ?? citation.keyword_score ?? null,
+      metadata,
+      text: citation.text || ''
+    }
+  })
+}
+
+function safeCitationMetadata(metadata) {
+  const allowed = [
+    'chunk_type',
+    'parent_id',
+    'chunk_index',
+    'retrieval_strategy',
+    'full_document_context',
+    'doc_id',
+    'kb_id'
+  ]
+  return Object.fromEntries(Object.entries(metadata || {}).filter(([key]) => allowed.includes(key)))
+}
+
+function formatScore(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) {
+    return '-'
+  }
+  return number.toFixed(3)
+}
+
+function formatTraceSummary(trace) {
+  if (!trace) {
+    return ''
+  }
+  const parts = []
+  if (Number.isFinite(Number(trace.retrievalMs))) {
+    parts.push(`retrieval ${trace.retrievalMs}ms`)
+  }
+  if (Number.isFinite(Number(trace.rerankMs)) && Number(trace.rerankMs) > 0) {
+    parts.push(`rerank ${trace.rerankMs}ms`)
+  }
+  if (Number.isFinite(Number(trace.hitCount))) {
+    parts.push(`${trace.hitCount} hits`)
+  }
+  if (Number.isFinite(Number(trace.returnedCitationCount))) {
+    parts.push(`${trace.returnedCitationCount} citations`)
+  }
+  return parts.join(' | ')
 }
 
 function clearMissingSession(sessionId, options = {}) {

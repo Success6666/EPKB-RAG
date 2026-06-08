@@ -842,9 +842,82 @@ input:focus-visible {
 
 .citation-panel {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   margin-top: 12px;
+}
+
+.trace-summary {
+  color: var(--ds-muted);
+  font-size: 12px;
+}
+
+.citation-item {
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.citation-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  padding: 0 10px;
+  color: var(--ds-text-soft);
+  font-size: 12px;
+}
+
+.citation-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-meta,
+.citation-score {
+  color: var(--ds-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.citation-detail {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--ds-border);
+}
+
+.citation-text {
+  margin: 0;
+  color: var(--ds-text-soft);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.citation-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+  color: var(--ds-muted);
+  font-size: 12px;
+}
+
+.citation-fields div {
+  min-width: 0;
+}
+
+.citation-fields dt {
+  color: var(--ds-muted);
+}
+
+.citation-fields dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--ds-text-soft);
 }
 
 .citation-chip {

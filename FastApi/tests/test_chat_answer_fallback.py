@@ -1,6 +1,6 @@
 import unittest
 
-from app.api.routes.rag import NO_RELIABLE_EVIDENCE_ANSWER, no_answer_fallback_answer
+from app.api.routes.rag import NO_RELIABLE_EVIDENCE_ANSWER, chat_citations, no_answer_fallback_answer
 from app.schemas.rag import Citation, RetrievalHit
 
 
@@ -22,6 +22,39 @@ class ChatAnswerFallbackTests(unittest.TestCase):
         self.assertIn("已检索到可用于回答的知识库证据", answer)
         self.assertIn("新乡学院主要职责包括", answer)
         self.assertNotIn("低于阈值", answer)
+
+    def test_chat_citations_keep_scores_and_safe_metadata(self):
+        citations = chat_citations(
+            [
+                RetrievalHit(
+                    chunkId="chunk-1",
+                    text="evidence",
+                    score=0.87654,
+                    vectorScore=0.7,
+                    keywordScore=0.2,
+                    citation=Citation(docId="doc-1", chunkId="chunk-1", fileName="doc.txt", sourceUri="s3://doc.txt"),
+                    metadata={
+                        "chunk_id": "chunk-1",
+                        "doc_id": "doc-1",
+                        "kb_id": "kb-1",
+                        "retrieval_strategy": "hybrid",
+                        "api_key": "must-not-leak",
+                    },
+                )
+            ],
+            0.15,
+        )
+
+        citation = citations[0].model_dump(by_alias=True)
+        self.assertEqual(citation["docId"], "doc-1")
+        self.assertEqual(citation["chunkId"], "chunk-1")
+        self.assertEqual(citation["kbId"], "kb-1")
+        self.assertEqual(citation["sourceUri"], "s3://doc.txt")
+        self.assertEqual(citation["score"], 0.8765)
+        self.assertEqual(citation["vectorScore"], 0.7)
+        self.assertEqual(citation["keywordScore"], 0.2)
+        self.assertEqual(citation["metadata"]["retrieval_strategy"], "hybrid")
+        self.assertNotIn("api_key", citation["metadata"])
 
 
 def hit(chunk_id: str, text: str, score: float) -> RetrievalHit:

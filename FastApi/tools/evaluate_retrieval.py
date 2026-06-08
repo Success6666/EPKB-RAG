@@ -58,6 +58,14 @@ class ItemMetrics:
     false_positive_at_k: dict[int, bool]
     tags: list[str]
     error: str = ""
+    expected: dict[str, list[str]] = field(default_factory=dict)
+    top_hits: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MetricGate:
+    metric: str
+    threshold: float
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--endpoint", help="FastAPI RAG endpoint, for example http://localhost:8000/api/v1/rag/query.")
     parser.add_argument("--output", help="Optional path to write summary JSON.")
     parser.add_argument("--failures", help="Optional path to write per-query failure CSV.")
+    parser.add_argument("--failure-jsonl", help="Optional path to write detailed per-query failure JSONL.")
+    parser.add_argument("--fail-under", action="append", default=[], help="Metric gate like recall@5=0.85. Can be repeated.")
     parser.add_argument("--top-k", type=int, default=40, help="topK used when calling --endpoint.")
     parser.add_argument("--mode", default="hybrid", choices=("hybrid", "vector", "keyword"))
     parser.add_argument("--score-threshold", type=float, default=None)
@@ -90,13 +100,19 @@ def main(argv: list[str] | None = None) -> int:
 
     metrics = [score_item(item, results.get(item.id, {"hits": [], "error": "missing result"}), k_values) for item in gold_items]
     summary = summarize(metrics, k_values)
+    gates = parse_metric_gates(args.fail_under)
+    gate_failures = evaluate_metric_gates(summary, gates)
+    if gate_failures:
+        summary["gateFailures"] = gate_failures
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     if args.output:
         Path(args.output).write_text(json.dumps({"summary": summary, "items": [metric_to_dict(m) for m in metrics]}, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.failures:
         write_failures_csv(Path(args.failures), metrics, k_values)
-    return 0
+    if args.failure_jsonl:
+        write_failures_jsonl(Path(args.failure_jsonl), metrics, k_values)
+    return 2 if gate_failures else 0
 
 
 def parse_k_values(value: str) -> list[int]:
@@ -104,6 +120,19 @@ def parse_k_values(value: str) -> list[int]:
     if not parsed or any(item <= 0 for item in parsed):
         raise ValueError("--k must contain positive integers")
     return parsed
+
+
+def parse_metric_gates(values: list[str]) -> list[MetricGate]:
+    gates: list[MetricGate] = []
+    for value in values:
+        if "=" not in value:
+            raise ValueError("--fail-under must use metric=value, for example recall@5=0.85")
+        metric, threshold = value.split("=", 1)
+        metric = metric.strip()
+        if not metric:
+            raise ValueError("--fail-under metric name cannot be empty")
+        gates.append(MetricGate(metric=metric, threshold=float(threshold.strip())))
+    return gates
 
 
 def load_gold(path: Path) -> list[GoldItem]:
@@ -190,7 +219,8 @@ def post_json(endpoint: str, payload: dict[str, Any], timeout: float) -> dict[st
 
 
 def score_item(item: GoldItem, result: dict[str, Any], k_values: list[int]) -> ItemMetrics:
-    hits = [parse_hit(hit) for hit in result.get("hits") or []]
+    raw_hits = list(result.get("hits") or [])
+    hits = [parse_hit(hit) for hit in raw_hits]
     error = str(result.get("error") or "")
     matched_rank = first_relevant_rank(item, hits)
     reciprocal_rank = 0.0 if matched_rank is None else 1.0 / matched_rank
@@ -210,6 +240,8 @@ def score_item(item: GoldItem, result: dict[str, Any], k_values: list[int]) -> I
         false_positive_at_k=false_positive_at_k,
         tags=item.tags,
         error=error,
+        expected=expected_targets(item),
+        top_hits=[hit_to_dict(hit, raw_hit) for hit, raw_hit in zip(hits[:10], raw_hits[:10])],
     )
 
 
@@ -223,6 +255,38 @@ def parse_hit(row: dict[str, Any]) -> Hit:
         score=float(row["score"]) if row.get("score") is not None else None,
         title=string_or_none(citation.get("fileName") or citation.get("file_name")),
     )
+
+
+def hit_to_dict(hit: Hit, raw_hit: dict[str, Any]) -> dict[str, Any]:
+    metadata = raw_hit.get("metadata") or {}
+    return {
+        "docId": hit.doc_id,
+        "chunkId": hit.chunk_id,
+        "parentId": hit.parent_id,
+        "score": hit.score,
+        "title": hit.title,
+        "vectorScore": value_by_alias(raw_hit, "vectorScore", "vector_score"),
+        "keywordScore": value_by_alias(raw_hit, "keywordScore", "keyword_score"),
+        "retrievalStrategy": metadata.get("retrieval_strategy"),
+        "chunkType": metadata.get("chunk_type"),
+        "fullDocumentContext": bool(metadata.get("full_document_context")),
+        "preview": " ".join(str(raw_hit.get("text") or "").split())[:240],
+    }
+
+
+def expected_targets(item: GoldItem) -> dict[str, list[str]]:
+    return {
+        "docIds": sorted(item.relevant_doc_ids),
+        "chunkIds": sorted(item.relevant_chunk_ids),
+        "parentIds": sorted(item.relevant_parent_ids),
+    }
+
+
+def value_by_alias(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in row:
+            return row[key]
+    return None
 
 
 def string_or_none(value: Any) -> str | None:
@@ -326,7 +390,52 @@ def summarize(metrics: list[ItemMetrics], k_values: list[int]) -> dict[str, Any]
         summary[f"hit_rate@{k}"] = mean(1.0 if item.matched_rank is not None and item.matched_rank <= k else 0.0 for item in answerable)
         if unanswerable:
             summary[f"false_positive_rate@{k}"] = mean(1.0 if item.false_positive_at_k[k] else 0.0 for item in unanswerable)
+    tag_summary = summarize_by_tag(metrics, k_values)
+    if tag_summary:
+        summary["byTag"] = tag_summary
     return summary
+
+
+def summarize_by_tag(metrics: list[ItemMetrics], k_values: list[int]) -> dict[str, Any]:
+    grouped: dict[str, list[ItemMetrics]] = {}
+    for metric in metrics:
+        for tag in metric.tags:
+            grouped.setdefault(tag, []).append(metric)
+    result: dict[str, Any] = {}
+    for tag, tag_metrics in sorted(grouped.items()):
+        answerable = [item for item in tag_metrics if item.answerable]
+        unanswerable = [item for item in tag_metrics if not item.answerable]
+        item_summary: dict[str, Any] = {
+            "total": len(tag_metrics),
+            "answerable": len(answerable),
+            "unanswerable": len(unanswerable),
+            "mrr": mean(item.reciprocal_rank for item in answerable),
+            "ndcg": mean(item.ndcg for item in answerable),
+            "errors": sum(1 for item in tag_metrics if item.error),
+        }
+        for k in k_values:
+            item_summary[f"recall@{k}"] = mean(item.recall[k] for item in answerable)
+            item_summary[f"hit_rate@{k}"] = mean(
+                1.0 if item.matched_rank is not None and item.matched_rank <= k else 0.0 for item in answerable
+            )
+            if unanswerable:
+                item_summary[f"false_positive_rate@{k}"] = mean(
+                    1.0 if item.false_positive_at_k[k] else 0.0 for item in unanswerable
+                )
+        result[tag] = item_summary
+    return result
+
+
+def evaluate_metric_gates(summary: dict[str, Any], gates: list[MetricGate]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for gate in gates:
+        actual = summary.get(gate.metric)
+        if actual is None:
+            failures.append({"metric": gate.metric, "threshold": gate.threshold, "actual": None, "reason": "missing"})
+            continue
+        if float(actual) < gate.threshold:
+            failures.append({"metric": gate.metric, "threshold": gate.threshold, "actual": actual, "reason": "below_threshold"})
+    return failures
 
 
 def mean(values) -> float:
@@ -350,6 +459,8 @@ def metric_to_dict(metric: ItemMetrics) -> dict[str, Any]:
         "falsePositiveAtK": metric.false_positive_at_k,
         "tags": metric.tags,
         "error": metric.error,
+        "expected": metric.expected,
+        "topHits": metric.top_hits,
     }
 
 
@@ -377,6 +488,16 @@ def write_failures_csv(path: Path, metrics: list[ItemMetrics], k_values: list[in
                         "error": metric.error,
                     }
                 )
+
+
+def write_failures_jsonl(path: Path, metrics: list[ItemMetrics], k_values: list[int]) -> None:
+    max_k = max(k_values)
+    with path.open("w", encoding="utf-8") as handle:
+        for metric in metrics:
+            failed_answerable = metric.answerable and metric.recall[max_k] < 1.0
+            failed_unanswerable = not metric.answerable and metric.false_positive_at_k[max_k]
+            if failed_answerable or failed_unanswerable or metric.error:
+                handle.write(json.dumps(metric_to_dict(metric), ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

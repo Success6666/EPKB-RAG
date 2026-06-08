@@ -137,7 +137,7 @@ public class RagApiClient {
             null,
             "Knowledge retrieval is temporarily unavailable. LangChain4j fallback also failed; please check FastAPI, vector storage, and model service.",
             List.of(),
-            new ChatAskResponse.Trace(0, 0, 0, 0)
+            emptyTrace(0)
         );
     }
 
@@ -175,7 +175,7 @@ public class RagApiClient {
             return completed;
         }
         if (!answer.isEmpty()) {
-            return new ChatAskResponse(request.sessionId(), answer.toString(), List.of(), new ChatAskResponse.Trace(0, 0, 0, request.topK()));
+            return new ChatAskResponse(request.sessionId(), answer.toString(), List.of(), emptyTrace(request.topK()));
         }
         throw new RestClientException("FastAPI stream ended without a done event.");
     }
@@ -219,7 +219,7 @@ public class RagApiClient {
                 request.sessionId(),
                 answer.toString(),
                 event.citations() == null ? List.of() : event.citations(),
-                event.trace() == null ? new ChatAskResponse.Trace(0, 0, 0, request.topK()) : event.trace()
+                event.trace() == null ? emptyTrace(request.topK()) : event.trace()
             );
         }
         if ("error".equals(event.type())) {
@@ -242,6 +242,10 @@ public class RagApiClient {
         } catch (JsonProcessingException ex) {
             throw new IllegalArgumentException("Failed to serialize FastAPI chat request.", ex);
         }
+    }
+
+    private ChatAskResponse.Trace emptyTrace(Integer topK) {
+        return new ChatAskResponse.Trace(0, 0, 0, topK, null, 0, 0, List.of(), List.of());
     }
 
     public static class StreamCancellation {

@@ -103,9 +103,16 @@ class ChatAskRequest(ApiModel):
 class ChatCitation(ApiModel):
     id: str
     title: str
+    doc_id: str | None = Field(default=None, alias="docId")
+    chunk_id: str | None = Field(default=None, alias="chunkId")
+    kb_id: str | None = Field(default=None, alias="kbId")
+    source_uri: str | None = Field(default=None, alias="sourceUri")
     page: int | None = None
     score: float
+    vector_score: float | None = Field(default=None, alias="vectorScore")
+    keyword_score: float | None = Field(default=None, alias="keywordScore")
     text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatTrace(ApiModel):
@@ -113,6 +120,11 @@ class ChatTrace(ApiModel):
     rerank_ms: int = Field(default=0, alias="rerankMs")
     generation_ms: int = Field(default=0, alias="generationMs")
     top_k: int = Field(..., alias="topK")
+    score_threshold: float | None = Field(default=None, alias="scoreThreshold")
+    hit_count: int = Field(default=0, alias="hitCount")
+    returned_citation_count: int = Field(default=0, alias="returnedCitationCount")
+    knowledge_base_ids: list[str] = Field(default_factory=list, alias="knowledgeBaseIds")
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ChatAskResponse(ApiModel):

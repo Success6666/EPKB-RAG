@@ -76,7 +76,17 @@ public class LangChain4jChatService {
                 request.sessionId(),
                 "（LangChain4j 模型降级回答，未使用知识库检索）\n\n" + answer,
                 List.of(),
-                new ChatAskResponse.Trace(0, 0, generationMs, request.topK() == null ? 0 : request.topK())
+                new ChatAskResponse.Trace(
+                    0,
+                    0,
+                    generationMs,
+                    request.topK() == null ? 0 : request.topK(),
+                    null,
+                    0,
+                    0,
+                    List.of(),
+                    List.of()
+                )
             ));
         } catch (Exception ex) {
             log.warn("LangChain4j fallback chat failed: {}", ex.getMessage());

@@ -62,17 +62,7 @@ async def ask_chat(request: ChatAskRequest) -> ChatAskResponse:
         top_p=request.top_p,
     )
     retrieval_ms = int((time.perf_counter() - started) * 1000)
-    citations = [
-        ChatCitation(
-            id=hit.chunk_id,
-            title=hit.citation.file_name or hit.citation.doc_id or "unknown",
-            page=hit.citation.page,
-            score=round(hit.score, 4),
-            text=chat_citation_text(hit),
-        )
-        for hit in response.hits
-        if hit.score >= request.score_threshold
-    ]
+    citations = chat_citations(response.hits, request.score_threshold)
     answer = response.answer or no_answer_fallback_answer(response.hits, request.score_threshold)
     if response.warnings:
         answer = "\n".join([f"检索提示：{warning}" for warning in response.warnings] + ["", answer])
@@ -85,6 +75,11 @@ async def ask_chat(request: ChatAskRequest) -> ChatAskResponse:
             rerankMs=response.rerank_ms,
             generationMs=retrieval_ms,
             topK=request.top_k,
+            scoreThreshold=request.score_threshold,
+            hitCount=len(response.hits),
+            returnedCitationCount=len(citations),
+            knowledgeBaseIds=kb_ids,
+            warnings=response.warnings,
         ),
     )
 
@@ -231,6 +226,11 @@ async def ask_chat_stream(request: ChatAskRequest) -> StreamingResponse:
                 rerankMs=response.rerank_ms,
                 generationMs=int((time.perf_counter() - generation_started) * 1000),
                 topK=request.top_k,
+                scoreThreshold=request.score_threshold,
+                hitCount=len(response.hits),
+                returnedCitationCount=len(citations),
+                knowledgeBaseIds=kb_ids,
+                warnings=response.warnings,
             )
             yield sse_event(
                 "done",
@@ -253,13 +253,40 @@ def chat_citations(hits, score_threshold: float) -> list[ChatCitation]:
         ChatCitation(
             id=hit.chunk_id,
             title=hit.citation.file_name or hit.citation.doc_id or "unknown",
+            docId=hit.citation.doc_id,
+            chunkId=hit.chunk_id,
+            kbId=string_or_none(hit.metadata.get("kb_id") or hit.metadata.get("kbId")),
+            sourceUri=hit.citation.source_uri,
             page=hit.citation.page,
             score=round(hit.score, 4),
+            vectorScore=round(hit.vector_score, 4) if hit.vector_score is not None else None,
+            keywordScore=round(hit.keyword_score, 4) if hit.keyword_score is not None else None,
             text=chat_citation_text(hit),
+            metadata=safe_citation_metadata(hit.metadata),
         )
         for hit in hits
         if hit.score >= score_threshold
     ]
+
+
+def safe_citation_metadata(metadata: dict) -> dict:
+    allowed = {
+        "chunk_type",
+        "parent_id",
+        "chunk_index",
+        "retrieval_strategy",
+        "full_document_context",
+        "doc_id",
+        "kb_id",
+    }
+    return {key: value for key, value in (metadata or {}).items() if key in allowed}
+
+
+def string_or_none(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def chat_citation_text(hit, limit: int = 1200) -> str:

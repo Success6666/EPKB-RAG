@@ -1,6 +1,14 @@
 import unittest
 
-from tools.evaluate_retrieval import Hit, GoldItem, parse_k_values, score_item, summarize
+from tools.evaluate_retrieval import (
+    Hit,
+    GoldItem,
+    evaluate_metric_gates,
+    parse_k_values,
+    parse_metric_gates,
+    score_item,
+    summarize,
+)
 
 
 class RetrievalEvaluationTests(unittest.TestCase):
@@ -66,9 +74,82 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(summary["total"], 2)
         self.assertEqual(summary["recall@1"], 1)
         self.assertEqual(summary["false_positive_rate@1"], 1)
+        self.assertNotIn("byTag", summary)
+
+    def test_summarize_groups_metrics_by_tag(self):
+        answerable = GoldItem(
+            id="q1",
+            query="q",
+            tenant_id="1",
+            kb_id="10",
+            relevant_doc_ids={"doc-a"},
+            tags=["policy", "exact"],
+        )
+        metrics = [
+            score_item(answerable, {"hits": [{"chunkId": "c", "citation": {"docId": "doc-a", "chunkId": "c"}}]}, [1])
+        ]
+
+        summary = summarize(metrics, [1])
+
+        self.assertEqual(summary["byTag"]["policy"]["total"], 1)
+        self.assertEqual(summary["byTag"]["exact"]["recall@1"], 1)
+
+    def test_metric_gates_report_failures(self):
+        gates = parse_metric_gates(["recall@5=0.8", "mrr=0.5"])
+
+        failures = evaluate_metric_gates({"recall@5": 0.75, "mrr": 0.5}, gates)
+
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["metric"], "recall@5")
 
     def test_parse_k_values_sorts_and_deduplicates(self):
         self.assertEqual(parse_k_values("10,1,5,5"), [1, 5, 10])
+
+    def test_score_item_keeps_failure_diagnostics(self):
+        item = GoldItem(id="q3", query="q", tenant_id="1", kb_id="10", relevant_doc_ids={"doc-a"})
+
+        metrics = score_item(
+            item,
+            {
+                "hits": [
+                    {
+                        "chunkId": "noise",
+                        "text": "irrelevant text",
+                        "score": 0.3,
+                        "citation": {"docId": "doc-noise", "chunkId": "noise", "fileName": "noise.txt"},
+                        "metadata": {"parent_id": "parent-noise", "retrieval_strategy": "hybrid"},
+                    }
+                ]
+            },
+            [1],
+        )
+
+        self.assertEqual(metrics.expected["docIds"], ["doc-a"])
+        self.assertEqual(metrics.top_hits[0]["docId"], "doc-noise")
+        self.assertEqual(metrics.top_hits[0]["retrievalStrategy"], "hybrid")
+
+    def test_failure_diagnostics_keep_zero_scores(self):
+        item = GoldItem(id="q4", query="q", tenant_id="1", kb_id="10", relevant_doc_ids={"doc-a"})
+
+        metrics = score_item(
+            item,
+            {
+                "hits": [
+                    {
+                        "chunkId": "noise",
+                        "score": 0.0,
+                        "vectorScore": 0.0,
+                        "keyword_score": 0.0,
+                        "citation": {"docId": "doc-noise", "chunkId": "noise"},
+                    }
+                ]
+            },
+            [1],
+        )
+
+        self.assertEqual(metrics.top_hits[0]["score"], 0.0)
+        self.assertEqual(metrics.top_hits[0]["vectorScore"], 0.0)
+        self.assertEqual(metrics.top_hits[0]["keywordScore"], 0.0)
 
     def test_hit_dataclass_accepts_missing_fields(self):
         hit = Hit(doc_id=None, chunk_id=None, parent_id=None)
