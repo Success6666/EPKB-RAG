@@ -150,6 +150,12 @@ const mockTenants = [
   { id: '3', name: '研发知识库', code: 'ENT-RD00001', role: 'employee', quota: '160 GB' }
 ]
 
+const mockKnowledgeBases = [
+  { id: '1', name: '制度与流程', description: '企业制度、流程规范和审批说明' },
+  { id: '2', name: '合同档案', description: '合同模板、签署记录和履约材料' },
+  { id: '3', name: '项目经验库', description: '项目复盘、交付经验和常见问题' }
+]
+
 const mockEmployees = [
   {
     userId: 'u-demo',
@@ -377,6 +383,10 @@ export const ragClient = {
 
   listCompanies() {
     return withFallback(() => api.get('/tenants/companies'), { items: mockCompanies })
+  },
+
+  listKnowledgeBases() {
+    return withFallback(() => api.get('/documents/knowledge-bases'), { items: mockKnowledgeBases })
   },
 
   uploadDocument({ file, tenantId, knowledgeBase, tags }) {

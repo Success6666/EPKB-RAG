@@ -179,6 +179,22 @@
       <form class="composer-wrap" @submit.prevent="askQuestion">
         <div class="composer">
           <div class="composer-tools">
+            <el-select
+              v-model="chatForm.knowledgeBase"
+              class="composer-kb-select"
+              size="small"
+              :disabled="!session.token || isActiveConversationStreaming"
+              filterable
+              placeholder="知识库"
+            >
+              <el-option label="全部知识库" value="all" />
+              <el-option
+                v-for="kb in knowledgeBases"
+                :key="kb.id"
+                :label="kb.name"
+                :value="String(kb.id)"
+              />
+            </el-select>
             <button
               class="thinking-toggle"
               :class="{ active: chatForm.deepThinking }"
@@ -413,9 +429,12 @@
           <el-form :model="uploadForm" label-position="top" class="upload-form">
             <el-form-item label="知识库">
               <el-select v-model="uploadForm.knowledgeBase" placeholder="选择或输入知识库" filterable allow-create>
-                <el-option label="制度与流程" value="制度与流程" />
-                <el-option label="合同档案" value="合同档案" />
-                <el-option label="项目经验库" value="项目经验库" />
+                <el-option
+                  v-for="name in uploadKnowledgeBaseOptions"
+                  :key="name"
+                  :label="name"
+                  :value="name"
+                />
               </el-select>
             </el-form-item>
             <el-form-item label="标签">
@@ -696,6 +715,8 @@ const loading = reactive({
   employeeRole: ''
 })
 
+const DEFAULT_UPLOAD_KNOWLEDGE_BASE = '制度与流程'
+const FALLBACK_UPLOAD_KNOWLEDGE_BASES = ['制度与流程', '合同档案', '项目经验库']
 const TASK_REFRESH_INTERVAL_MS = 2500
 
 const session = reactive({
@@ -719,7 +740,7 @@ const registerForm = reactive({
 })
 
 const uploadForm = reactive({
-  knowledgeBase: '制度与流程',
+  knowledgeBase: DEFAULT_UPLOAD_KNOWLEDGE_BASE,
   tags: ''
 })
 
@@ -754,6 +775,7 @@ const modelForm = reactive({
 
 const tenants = ref([])
 const tasks = ref([])
+const knowledgeBases = ref([])
 const models = ref([])
 const chatHistory = ref([])
 const historyMenuSessionId = ref('')
@@ -794,6 +816,10 @@ const runningTasks = computed(() => tasks.value.filter((task) => ['queued', 'run
 const activeModel = computed(() => models.value.find((model) => model.enabled))
 const messages = computed(() => conversationMessages[activeConversationKey.value] || [])
 const isActiveConversationStreaming = computed(() => Boolean(streamingConversations[activeConversationKey.value]))
+const uploadKnowledgeBaseOptions = computed(() => {
+  const names = knowledgeBases.value.map((kb) => kb.name).filter(Boolean)
+  return names.length ? names : FALLBACK_UPLOAD_KNOWLEDGE_BASES
+})
 const navItems = computed(() => [
   { key: 'dashboard', label: '概览', icon: DataBoard },
   ...(canUploadDocuments.value ? [{ key: 'upload', label: '文档', icon: UploadFilled }] : []),
@@ -928,12 +954,15 @@ function logout() {
   session.user = null
   tenants.value = []
   tasks.value = []
+  knowledgeBases.value = []
   notifiedFailedTaskIds.clear()
   models.value = []
   employees.value = []
   companies.value = []
   chatHistory.value = []
   userMenuOpen.value = false
+  chatForm.knowledgeBase = 'all'
+  uploadForm.knowledgeBase = DEFAULT_UPLOAD_KNOWLEDGE_BASE
   resetConversation()
   stopTaskAutoRefresh()
   window.localStorage.removeItem('rag_token')
@@ -981,7 +1010,7 @@ async function bootstrapAfterLogin() {
   setAuthContext(session)
   persistSession()
   keepSectionVisible()
-  await Promise.all([loadTasks(), loadModels(), loadChatHistory(), loadEmployees(), loadCompanies()])
+  await Promise.all([loadTasks(), loadKnowledgeBases(), loadModels(), loadChatHistory(), loadEmployees(), loadCompanies()])
   fillModelForm(activeModel.value || models.value[0])
 }
 
@@ -989,11 +1018,13 @@ async function onTenantChange() {
   cancelActiveStreams()
   clearConversationState()
   notifiedFailedTaskIds.clear()
+  chatForm.knowledgeBase = 'all'
+  uploadForm.knowledgeBase = DEFAULT_UPLOAD_KNOWLEDGE_BASE
   persistSession()
   setAuthContext(session)
   resetConversation()
   keepSectionVisible()
-  await Promise.all([loadTasks(), loadModels(), loadChatHistory(), loadEmployees()])
+  await Promise.all([loadTasks(), loadKnowledgeBases(), loadModels(), loadChatHistory(), loadEmployees()])
   fillModelForm(activeModel.value || models.value[0])
 }
 
@@ -1051,6 +1082,55 @@ function taskNotificationKey(task) {
 
 function documentIdFromTask(task) {
   return String(task?.documentId || task?.docId || String(task?.id || '').replace(/^job-/, ''))
+}
+
+function selectedChatKnowledgeBase() {
+  if (chatForm.knowledgeBase === 'all') {
+    return null
+  }
+  return knowledgeBases.value.find((kb) => kb.id === String(chatForm.knowledgeBase)) || null
+}
+
+function selectedChatKnowledgeBaseIds() {
+  const selected = selectedChatKnowledgeBase()
+  return selected ? [selected.id] : []
+}
+
+function selectedChatKnowledgeBaseName() {
+  return selectedChatKnowledgeBase()?.name || chatForm.knowledgeBase
+}
+
+async function loadKnowledgeBases() {
+  if (!session.token || !session.tenantId) {
+    knowledgeBases.value = []
+    chatForm.knowledgeBase = 'all'
+    return
+  }
+  try {
+    const data = await ragClient.listKnowledgeBases()
+    knowledgeBases.value = (data.items || []).map((item) => ({
+      id: String(item.id),
+      name: item.name || `知识库 ${item.id}`,
+      description: item.description || ''
+    }))
+    if (chatForm.knowledgeBase !== 'all' && !knowledgeBases.value.some((kb) => kb.id === String(chatForm.knowledgeBase))) {
+      chatForm.knowledgeBase = 'all'
+    }
+    if (
+      knowledgeBases.value.length
+      && (!uploadForm.knowledgeBase || uploadForm.knowledgeBase === DEFAULT_UPLOAD_KNOWLEDGE_BASE)
+      && !knowledgeBases.value.some((kb) => kb.name === uploadForm.knowledgeBase)
+    ) {
+      uploadForm.knowledgeBase = knowledgeBases.value[0].name
+    }
+  } catch (error) {
+    if (isUnauthorized(error)) {
+      knowledgeBases.value = []
+      handleAuthFailure(error)
+      return
+    }
+    knowledgeBases.value = []
+  }
 }
 
 async function deleteDocument(task) {
@@ -1345,6 +1425,8 @@ async function askQuestion() {
   const requestSessionId = chatForm.sessionId || ''
   const requestTenantId = session.tenantId || ''
   const requestDeepThinking = chatForm.deepThinking
+  const requestKnowledgeBaseIds = selectedChatKnowledgeBaseIds()
+  const requestKnowledgeBaseName = selectedChatKnowledgeBaseName()
   const requestGeneration = streamGeneration
   const requestKey = chatForm.sessionId ? conversationKey(chatForm.sessionId) : activeConversationKey.value
   let streamKey = requestKey
@@ -1375,7 +1457,8 @@ async function askQuestion() {
       tenantId: requestTenantId || undefined,
       sessionId: requestSessionId || undefined,
       question,
-      knowledgeBase: chatForm.knowledgeBase,
+      knowledgeBase: requestKnowledgeBaseIds.length ? requestKnowledgeBaseName : 'all',
+      knowledgeBaseIds: requestKnowledgeBaseIds.length ? requestKnowledgeBaseIds : undefined,
       topK: chatForm.topK,
       temperature: chatForm.temperature,
       scoreThreshold: chatForm.scoreThreshold,

@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.rag.common.exception.BizException;
 import com.example.rag.config.RagProperties;
+import com.example.rag.document.dto.KnowledgeBaseListResponse;
 import com.example.rag.document.dto.TaskListResponse;
 import com.example.rag.document.dto.DocumentStatusCallbackRequest;
 import com.example.rag.document.dto.UploadTaskResponse;
@@ -151,6 +152,22 @@ public class DocumentService {
             .map(doc -> toTaskResponse(doc, knowledgeBaseMapper.selectById(doc.getKnowledgeBaseId())))
             .toList();
         return new TaskListResponse(items);
+    }
+
+    public KnowledgeBaseListResponse listKnowledgeBases() {
+        Long tenantId = TenantContext.tenantId();
+        List<KnowledgeBaseListResponse.Item> items = knowledgeBaseMapper.selectList(new LambdaQueryWrapper<KnowledgeBase>()
+            .eq(KnowledgeBase::getTenantId, tenantId)
+            .eq(KnowledgeBase::getDeleted, 0)
+            .orderByAsc(KnowledgeBase::getId))
+            .stream()
+            .map(kb -> new KnowledgeBaseListResponse.Item(
+                String.valueOf(kb.getId()),
+                kb.getName(),
+                kb.getDescription()
+            ))
+            .toList();
+        return new KnowledgeBaseListResponse(items);
     }
 
     @Transactional

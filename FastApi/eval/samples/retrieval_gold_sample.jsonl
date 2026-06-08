@@ -1,0 +1,3 @@
+{"id":"policy-duty-001","tenantId":"1","kbId":"10","query":"基层教学组织的主要职责是什么？","answerable":true,"relevant":{"docIds":["doc-policy-2026"],"chunkIds":["chunk-duty-01"],"parentIds":["parent-duty"]},"tags":["heading","policy","exact"]}
+{"id":"contract-template-001","tenantId":"1","kbId":"11","query":"帮我找一份采购合同模板","answerable":true,"relevant":{"docIds":["doc-contract-template"]},"tags":["template","full-document"]}
+{"id":"no-answer-001","tenantId":"1","kbId":"10","query":"公司食堂下周三午餐菜单是什么？","answerable":false,"relevant":{"docIds":[],"chunkIds":[],"parentIds":[]},"tags":["no-answer"]}

@@ -142,6 +142,48 @@ curl -X POST http://localhost:8000/api/v1/rag/query `
 - `sourceUri`
 - `page`
 
+## RAG 召回评测
+
+召回效果不要只靠主观问答判断，建议维护一份离线 gold set，并持续观察 `Recall@K`、`MRR`、`NDCG` 和无答案误召率。
+
+样例文件：
+
+- `eval/samples/retrieval_gold_sample.jsonl`：标准答案集，每行一个问题。
+- `eval/samples/retrieval_results_sample.jsonl`：检索结果样例，每行对应一个问题。
+- `tools/evaluate_retrieval.py`：离线评测脚本。
+
+使用已有结果文件评测：
+
+```powershell
+cd E:\AI\FastApi
+python tools/evaluate_retrieval.py `
+  --gold eval/samples/retrieval_gold_sample.jsonl `
+  --results eval/samples/retrieval_results_sample.jsonl `
+  --output eval/retrieval_report.json `
+  --failures eval/retrieval_failures.csv
+```
+
+直接调用正在运行的 FastAPI 评测：
+
+```powershell
+cd E:\AI\FastApi
+python tools/evaluate_retrieval.py `
+  --gold eval/samples/retrieval_gold_sample.jsonl `
+  --endpoint http://localhost:8000/api/v1/rag/query `
+  --top-k 40 `
+  --mode hybrid `
+  --output eval/retrieval_report.json `
+  --failures eval/retrieval_failures.csv
+```
+
+gold set 每行建议包含：
+
+```json
+{"id":"policy-duty-001","tenantId":"1","kbId":"10","query":"基层教学组织的主要职责是什么？","answerable":true,"relevant":{"docIds":["doc-policy-2026"],"chunkIds":["chunk-duty-01"],"parentIds":["parent-duty"]},"tags":["heading","policy"]}
+```
+
+评测样本至少覆盖：精确条款、标题章节、同义问法、跨段答案、合同/模板整文、表格/Excel、OCR PDF、长文档、多相似文档和无答案问题。调参前后分别保存报告，重点看失败 CSV 中的漏召问题和无答案误召问题。
+
 ## 配置
 
 复制 `.env.example` 到 `.env` 后按环境调整。

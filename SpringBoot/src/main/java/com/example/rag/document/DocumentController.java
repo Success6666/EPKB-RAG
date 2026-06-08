@@ -4,6 +4,7 @@ import com.example.rag.document.dto.TaskListResponse;
 import com.example.rag.config.RagProperties;
 import com.example.rag.common.exception.BizException;
 import com.example.rag.document.dto.DocumentStatusCallbackRequest;
+import com.example.rag.document.dto.KnowledgeBaseListResponse;
 import com.example.rag.document.dto.UploadTaskResponse;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import jakarta.validation.constraints.NotBlank;
@@ -46,6 +47,12 @@ public class DocumentController {
     @SaCheckPermission("document:read")
     public TaskListResponse tasks(@RequestParam(value = "tenantId", required = false) Long tenantId) {
         return documentService.listTasks(tenantId);
+    }
+
+    @GetMapping("/knowledge-bases")
+    @SaCheckPermission("document:read")
+    public KnowledgeBaseListResponse knowledgeBases() {
+        return documentService.listKnowledgeBases();
     }
 
     @DeleteMapping("/{documentId}")

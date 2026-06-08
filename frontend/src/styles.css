@@ -889,8 +889,19 @@ input:focus-visible {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   min-height: 28px;
+}
+
+.composer-kb-select {
+  width: 156px;
+}
+
+.composer-kb-select .el-select__wrapper {
+  min-height: 28px;
+  border-radius: 8px;
+  box-shadow: none;
 }
 
 .thinking-toggle {
