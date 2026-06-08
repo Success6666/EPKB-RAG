@@ -14,6 +14,17 @@ class JavaDocumentStatusCallback:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def notify_running(self, job: DocumentIngestJob) -> None:
+        self._post(
+            {
+                "tenantId": job.tenant_id,
+                "docId": job.doc_id,
+                "status": "running",
+                "chunkCount": 0,
+                "errorMessage": None,
+            }
+        )
+
     def notify_success(self, job: DocumentIngestJob, response: DocumentIngestResponse) -> None:
         self._post(
             {

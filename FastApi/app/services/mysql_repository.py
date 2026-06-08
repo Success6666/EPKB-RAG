@@ -9,7 +9,7 @@ import aiomysql
 from aiomysql.cursors import DictCursor
 
 from app.core.config import Settings
-from app.langchain_modules.retrieval.scoring import keyword_score, tokenize
+from app.langchain_modules.retrieval.scoring import keyword_score, phrase_search_terms, tokenize
 from app.langchain_modules.retrieval.vector_store import KnowledgeBaseScope, VectorSearchResult
 
 logger = logging.getLogger(__name__)
@@ -44,11 +44,15 @@ class MySqlRepository:
                           file_name VARCHAR(255) NULL,
                           source_uri VARCHAR(1024) NULL,
                           page INT NULL,
+                          metadata_chunk_type VARCHAR(32) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."chunk_type"'))) STORED,
+                          metadata_parent_id VARCHAR(64) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."parent_id"'))) STORED,
                           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                           PRIMARY KEY (chunk_id),
                           KEY idx_py_chunk_scope_doc (tenant_id, kb_id, doc_id),
                           KEY idx_py_chunk_scope_index (tenant_id, kb_id, chunk_index),
+                          KEY idx_py_chunk_scope_type_doc (tenant_id, kb_id, metadata_chunk_type, doc_id, chunk_index),
+                          KEY idx_py_chunk_scope_type_parent (tenant_id, kb_id, metadata_chunk_type, metadata_parent_id, chunk_index),
                           FULLTEXT KEY ft_py_chunk_text (text)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                         """
@@ -86,6 +90,7 @@ class MySqlRepository:
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                         """
                     )
+                    await ensure_document_chunk_schema(cursor)
                 await connection.commit()
                 self._initialized = True
             except Exception:
@@ -112,26 +117,28 @@ class MySqlRepository:
                     (scope.tenant_id, scope.kb_id, doc_id),
                 )
                 if chunks:
-                    await cursor.executemany(
-                        """
-                        INSERT INTO rag_python_document_chunk (
-                          chunk_id, tenant_id, kb_id, doc_id, chunk_index, text, metadata,
-                          file_name, source_uri, page
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                          tenant_id=VALUES(tenant_id),
-                          kb_id=VALUES(kb_id),
-                          doc_id=VALUES(doc_id),
-                          chunk_index=VALUES(chunk_index),
-                          text=VALUES(text),
-                          metadata=VALUES(metadata),
-                          file_name=VALUES(file_name),
-                          source_uri=VALUES(source_uri),
-                          page=VALUES(page)
-                        """,
-                        [chunk_row(scope, doc_id, chunk) for chunk in chunks],
+                    insert_sql = """
+                    INSERT INTO rag_python_document_chunk (
+                      chunk_id, tenant_id, kb_id, doc_id, chunk_index, text, metadata,
+                      file_name, source_uri, page
                     )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                      tenant_id=VALUES(tenant_id),
+                      kb_id=VALUES(kb_id),
+                      doc_id=VALUES(doc_id),
+                      chunk_index=VALUES(chunk_index),
+                      text=VALUES(text),
+                      metadata=VALUES(metadata),
+                      file_name=VALUES(file_name),
+                      source_uri=VALUES(source_uri),
+                      page=VALUES(page)
+                    """
+                    for batch in batched(chunks, self.settings.mysql_ingest_insert_batch_size):
+                        await cursor.executemany(
+                            insert_sql,
+                            [chunk_row(scope, doc_id, chunk) for chunk in batch],
+                        )
             await connection.commit()
         except Exception:
             await connection.rollback()
@@ -206,7 +213,7 @@ class MySqlRepository:
         top_k: int,
     ) -> list[VectorSearchResult]:
         await self.ensure_schema()
-        terms = tokenize(query)
+        terms = list(dict.fromkeys([*phrase_search_terms(query), *tokenize(query)]))
         if not terms:
             return []
 
@@ -264,8 +271,8 @@ class MySqlRepository:
             FROM rag_python_document_chunk
             WHERE tenant_id=%s
               AND kb_id=%s
-              AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."chunk_type"')) = 'child'
-              AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."parent_id"')) IN ({placeholders})
+              AND metadata_chunk_type = 'child'
+              AND metadata_parent_id IN ({placeholders})
         """
         params: list[Any] = [scope.tenant_id, scope.kb_id, *scoped_parent_ids]
         filter_sql, filter_params = metadata_filter_clause(metadata_filter)
@@ -324,7 +331,7 @@ class MySqlRepository:
             FROM rag_python_document_chunk
             WHERE tenant_id=%s
               AND kb_id=%s
-              AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."chunk_type"')) = 'parent'
+              AND metadata_chunk_type = 'parent'
               AND chunk_id IN ({placeholders})
         """
         params: list[Any] = [scope.tenant_id, scope.kb_id, *scoped_parent_ids]
@@ -358,6 +365,64 @@ class MySqlRepository:
                 score=0.0,
             )
         return parents
+
+    async def parent_chunks_for_documents(
+        self,
+        scope: KnowledgeBaseScope,
+        doc_ids: list[str],
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> dict[str, list[VectorSearchResult]]:
+        await self.ensure_schema()
+        scoped_doc_ids = [doc_id for doc_id in dict.fromkeys(doc_ids) if doc_id]
+        if not scoped_doc_ids:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(scoped_doc_ids))
+        sql = f"""
+            SELECT chunk_id, tenant_id, kb_id, doc_id, chunk_index, text, metadata, file_name, source_uri, page
+            FROM rag_python_document_chunk
+            WHERE tenant_id=%s
+              AND kb_id=%s
+              AND doc_id IN ({placeholders})
+              AND metadata_chunk_type = 'parent'
+        """
+        params: list[Any] = [scope.tenant_id, scope.kb_id, *scoped_doc_ids]
+        filter_sql, filter_params = metadata_filter_clause(metadata_filter)
+        sql += filter_sql
+        sql += " ORDER BY doc_id ASC, chunk_index ASC"
+        params.extend(filter_params)
+
+        connection = await self.connection()
+        try:
+            async with connection.cursor() as cursor:
+                await cursor.execute(sql, params)
+                rows = list(await cursor.fetchall())
+        finally:
+            connection.close()
+
+        grouped: dict[str, list[VectorSearchResult]] = {doc_id: [] for doc_id in scoped_doc_ids}
+        for row in rows:
+            metadata = decode_json(row.get("metadata"))
+            metadata.setdefault("tenant_id", row.get("tenant_id"))
+            metadata.setdefault("kb_id", row.get("kb_id"))
+            metadata.setdefault("doc_id", row.get("doc_id"))
+            metadata.setdefault("chunk_id", row.get("chunk_id"))
+            metadata.setdefault("chunk_index", row.get("chunk_index"))
+            metadata.setdefault("file_name", row.get("file_name"))
+            metadata.setdefault("source_uri", row.get("source_uri"))
+            metadata.setdefault("page", row.get("page"))
+            doc_id = str(row.get("doc_id") or metadata.get("doc_id") or "")
+            if doc_id not in grouped:
+                continue
+            grouped[doc_id].append(
+                VectorSearchResult(
+                    chunk_id=str(row["chunk_id"]),
+                    text=row.get("text") or "",
+                    metadata=metadata,
+                    score=0.0,
+                )
+            )
+        return grouped
 
     async def begin_job(
         self,
@@ -510,11 +575,11 @@ class MySqlRepository:
         metadata_filter: dict[str, Any] | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        like_terms = terms[:8]
+        like_terms = like_search_terms(terms)
         if not like_terms:
             return []
         where = " OR ".join(["text LIKE %s" for _ in like_terms])
-        score = " + ".join(["CASE WHEN text LIKE %s THEN 1 ELSE 0 END" for _ in like_terms])
+        score = " + ".join(["CASE WHEN text LIKE %s THEN %s ELSE 0 END" for _ in like_terms])
         sql = f"""
             SELECT chunk_id, tenant_id, kb_id, doc_id, chunk_index, text, metadata, file_name, source_uri, page,
                    ({score}) AS keyword_score
@@ -523,7 +588,9 @@ class MySqlRepository:
               AND kb_id=%s
               AND ({where})
         """
-        params: list[Any] = [f"%{escape_like(term)}%" for term in like_terms]
+        params: list[Any] = []
+        for term in like_terms:
+            params.extend([f"%{escape_like(term)}%", like_term_weight(term)])
         params.extend([scope.tenant_id, scope.kb_id])
         params.extend([f"%{escape_like(term)}%" for term in like_terms])
         filter_sql, filter_params = metadata_filter_clause(metadata_filter)
@@ -581,6 +648,78 @@ def mysql_connection_kwargs(settings: Settings) -> dict[str, Any]:
     }
 
 
+async def ensure_document_chunk_schema(cursor: Any) -> None:
+    existing_columns = await table_columns(cursor, "rag_python_document_chunk")
+    if "metadata_chunk_type" not in existing_columns:
+        await cursor.execute(
+            """
+            ALTER TABLE rag_python_document_chunk
+            ADD COLUMN metadata_chunk_type VARCHAR(32)
+            GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."chunk_type"'))) STORED
+            """
+        )
+    if "metadata_parent_id" not in existing_columns:
+        await cursor.execute(
+            """
+            ALTER TABLE rag_python_document_chunk
+            ADD COLUMN metadata_parent_id VARCHAR(64)
+            GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."parent_id"'))) STORED
+            """
+        )
+
+    existing_indexes = await table_indexes(cursor, "rag_python_document_chunk")
+    if "idx_py_chunk_scope_type_doc" not in existing_indexes:
+        await cursor.execute(
+            """
+            CREATE INDEX idx_py_chunk_scope_type_doc
+            ON rag_python_document_chunk (tenant_id, kb_id, metadata_chunk_type, doc_id, chunk_index)
+            """
+        )
+    if "idx_py_chunk_scope_type_parent" not in existing_indexes:
+        await cursor.execute(
+            """
+            CREATE INDEX idx_py_chunk_scope_type_parent
+            ON rag_python_document_chunk (tenant_id, kb_id, metadata_chunk_type, metadata_parent_id, chunk_index)
+            """
+        )
+
+
+async def table_columns(cursor: Any, table_name: str) -> set[str]:
+    await cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+          AND table_name = %s
+        """,
+        (table_name,),
+    )
+    return {str(row_value(row, "column_name")) for row in await cursor.fetchall()}
+
+
+async def table_indexes(cursor: Any, table_name: str) -> set[str]:
+    await cursor.execute(
+        """
+        SELECT DISTINCT index_name
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = %s
+        """,
+        (table_name,),
+    )
+    return {str(row_value(row, "index_name")) for row in await cursor.fetchall()}
+
+
+def row_value(row: dict[str, Any], key: str) -> Any:
+    if key in row:
+        return row[key]
+    normalized_key = key.casefold()
+    for row_key, value in row.items():
+        if str(row_key).casefold() == normalized_key:
+            return value
+    return None
+
+
 def chunk_row(scope: KnowledgeBaseScope, doc_id: str, chunk: dict[str, Any]) -> tuple[Any, ...]:
     metadata = dict(chunk.get("metadata") or {})
     metadata.setdefault("tenant_id", scope.tenant_id)
@@ -601,18 +740,35 @@ def chunk_row(scope: KnowledgeBaseScope, doc_id: str, chunk: dict[str, Any]) -> 
     )
 
 
+def batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+    size = max(int(batch_size), 1)
+    return [items[start:start + size] for start in range(0, len(items), size)]
+
+
 def metadata_filter_clause(metadata_filter: dict[str, Any] | None) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     for key, value in (metadata_filter or {}).items():
         if value is None or not isinstance(value, (str, int, float, bool)):
             continue
-        clauses.append("JSON_UNQUOTE(JSON_EXTRACT(metadata, %s)) = %s")
-        params.append(f"$.{json_path_key(str(key))}")
+        indexed_column = metadata_filter_column(str(key))
+        if indexed_column:
+            clauses.append(f"{indexed_column} = %s")
+        else:
+            clauses.append("JSON_UNQUOTE(JSON_EXTRACT(metadata, %s)) = %s")
+            params.append(f"$.{json_path_key(str(key))}")
         params.append(str(value).lower() if isinstance(value, bool) else str(value))
     if not clauses:
         return "", []
     return " AND " + " AND ".join(clauses), params
+
+
+def metadata_filter_column(key: str) -> str | None:
+    if key == "chunk_type":
+        return "metadata_chunk_type"
+    if key == "parent_id":
+        return "metadata_parent_id"
+    return None
 
 
 def merge_keyword_rows(row_groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -636,6 +792,33 @@ def merge_keyword_rows(row_groups: list[list[dict[str, Any]]]) -> list[dict[str,
 def build_boolean_fulltext_query(query: str) -> str:
     terms = [term for term in tokenize(query) if term]
     return " ".join(f"+{term}*" for term in terms[:16])
+
+
+def like_search_terms(terms: list[str], limit: int = 16) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        value = str(term or "").strip().lower()
+        compact = "".join(value.split())
+        if len(compact) < 2 or value in seen:
+            continue
+        seen.add(value)
+        candidates.append(value)
+    ranked = sorted(
+        candidates,
+        key=lambda value: (like_term_weight(value), len("".join(value.split()))),
+        reverse=True,
+    )
+    return ranked[: max(limit, 0)]
+
+
+def like_term_weight(term: str) -> int:
+    compact_length = len("".join(str(term or "").split()))
+    if compact_length >= 8:
+        return 6
+    if compact_length >= 4:
+        return 3
+    return 1
 
 
 def json_path_key(key: str) -> str:

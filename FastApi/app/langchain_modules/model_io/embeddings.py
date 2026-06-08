@@ -1,10 +1,15 @@
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+import logging
+import time
 from typing import Any
 
 import httpx
 import numpy as np
 
 from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingProvider(ABC):
@@ -74,6 +79,11 @@ class NvidiaEmbeddingProvider(EmbeddingProvider):
         truncate: str,
         encoding_format: str,
         timeout_seconds: int,
+        batch_size: int,
+        max_concurrency: int,
+        max_retries: int,
+        retry_backoff_seconds: float,
+        retry_max_backoff_seconds: float,
     ) -> None:
         if not api_key:
             raise ValueError("NVIDIA_API_KEY is required when EMBEDDING_PROVIDER=nvidia")
@@ -83,6 +93,11 @@ class NvidiaEmbeddingProvider(EmbeddingProvider):
         self.truncate = truncate
         self.encoding_format = encoding_format
         self.timeout = timeout_seconds
+        self.batch_size = max(int(batch_size), 1)
+        self.max_concurrency = max(int(max_concurrency), 1)
+        self.max_retries = max(int(max_retries), 1)
+        self.retry_backoff_seconds = max(float(retry_backoff_seconds), 0.0)
+        self.retry_max_backoff_seconds = max(float(retry_max_backoff_seconds), self.retry_backoff_seconds)
         self._embeddings = None
 
     @property
@@ -100,7 +115,42 @@ class NvidiaEmbeddingProvider(EmbeddingProvider):
     def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
         if not texts:
             return []
-        response = httpx.post(
+        batches = [texts[start:start + self.batch_size] for start in range(0, len(texts), self.batch_size)]
+        if self.max_concurrency <= 1 or len(batches) <= 1:
+            vectors = [vector for batch in batches for vector in self._embed_batch(batch, input_type)]
+            return normalize_embedding_matrix(vectors, expected_count=len(texts))
+
+        workers = min(self.max_concurrency, len(batches))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            batch_vectors = list(executor.map(lambda batch: self._embed_batch(batch, input_type), batches))
+        vectors = [vector for batch in batch_vectors for vector in batch]
+        return normalize_embedding_matrix(vectors, expected_count=len(texts))
+
+    def _embed_batch(self, texts: list[str], input_type: str) -> list[list[float]]:
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = self._post_embeddings(texts, input_type)
+                response.raise_for_status()
+                payload = response.json()
+                data = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
+                return [item["embedding"] for item in data]
+            except httpx.HTTPStatusError as exc:
+                if not retryable_http_status(exc.response.status_code):
+                    raise
+                last_error = exc
+                self._log_retry(attempt, len(texts), exc)
+            except httpx.TransportError as exc:
+                last_error = exc
+                self._log_retry(attempt, len(texts), exc)
+            if attempt < self.max_retries:
+                time.sleep(self._retry_delay(attempt))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("NVIDIA embedding request failed without an exception.")
+
+    def _post_embeddings(self, texts: list[str], input_type: str) -> httpx.Response:
+        return httpx.post(
             f"{self.base_url}/embeddings",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -115,10 +165,23 @@ class NvidiaEmbeddingProvider(EmbeddingProvider):
             },
             timeout=self.timeout,
         )
-        response.raise_for_status()
-        payload = response.json()
-        data = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
-        return normalize_embedding_matrix([item["embedding"] for item in data], expected_count=len(texts))
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(
+            self.retry_backoff_seconds * (2 ** max(attempt - 1, 0)),
+            self.retry_max_backoff_seconds,
+        )
+
+    def _log_retry(self, attempt: int, batch_size: int, exc: Exception) -> None:
+        if attempt >= self.max_retries:
+            return
+        logger.warning(
+            "NVIDIA embedding request failed, retrying attempt=%s/%s batch_size=%s error=%s",
+            attempt,
+            self.max_retries,
+            batch_size,
+            exc,
+        )
 
 
 class NormalizedLangChainEmbeddings:
@@ -167,6 +230,11 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
             settings.nvidia_embedding_truncate,
             settings.nvidia_embedding_encoding_format,
             settings.ollama_timeout_seconds,
+            settings.nvidia_embedding_batch_size,
+            settings.nvidia_embedding_max_concurrency,
+            settings.nvidia_embedding_max_retries,
+            settings.nvidia_embedding_retry_backoff_seconds,
+            settings.nvidia_embedding_retry_max_backoff_seconds,
         )
     raise ValueError(f"Unsupported embedding provider: {settings.embedding_provider}")
 
@@ -180,6 +248,10 @@ def normalize_embedding_provider(provider: str | None) -> str:
     if value == "nvidia":
         return "nvidia"
     return value
+
+
+def retryable_http_status(status_code: int) -> bool:
+    return status_code == 429 or status_code >= 500
 
 
 def normalize_embedding_matrix(vectors: list[list[float]], expected_count: int | None = None) -> list[list[float]]:

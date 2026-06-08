@@ -182,6 +182,7 @@ class RabbitDocumentConsumer:
                     await self._ack(message)
                     return
 
+            await self._notify_running(callback, job)
             response = await get_ingestion_service().ingest(job)
             await repository.complete_job(job_key, response.chunk_count)
             if response.status == "deleted":
@@ -237,6 +238,12 @@ class RabbitDocumentConsumer:
         finally:
             if self.settings.runtime_gc_enabled:
                 await asyncio.to_thread(collect_runtime_memory, self.settings)
+
+    async def _notify_running(self, callback: Any, job: DocumentIngestJob) -> None:
+        try:
+            await asyncio.to_thread(callback.notify_running, job)
+        except Exception as exc:
+            logger.exception("Java running callback failed doc=%s: %s", job.doc_id, exc)
 
     async def _notify_success(self, callback: Any, job: DocumentIngestJob, response: Any) -> None:
         try:

@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     nvidia_embedding_model: str = "nvidia/nv-embedqa-e5-v5"
     nvidia_embedding_truncate: str = "NONE"
     nvidia_embedding_encoding_format: str = "float"
+    nvidia_embedding_batch_size: int = 64
+    nvidia_embedding_max_concurrency: int = 2
+    nvidia_embedding_max_retries: int = 4
+    nvidia_embedding_retry_backoff_seconds: float = 1.0
+    nvidia_embedding_retry_max_backoff_seconds: float = 12.0
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
@@ -64,6 +69,10 @@ class Settings(BaseSettings):
     query_rewrite_max_history_messages: int = 6
     llm_context_refinement_enabled: bool = True
     llm_context_refinement_max_hits: int = 8
+    full_document_context_enabled: bool = True
+    full_document_context_max_docs: int = 2
+    full_document_context_max_chars: int = 24000
+    full_document_context_min_score: float = 0.15
     ocr_enabled: bool = True
     ocr_min_confidence: float = 0.35
     ocr_max_images_per_document: int = 80
@@ -109,6 +118,7 @@ class Settings(BaseSettings):
     mysql_connect_timeout_seconds: int = 5
     mysql_read_timeout_seconds: int = 30
     mysql_write_timeout_seconds: int = 30
+    mysql_ingest_insert_batch_size: int = 500
     mysql_keyword_fulltext_enabled: bool = True
     mysql_keyword_like_fallback_enabled: bool = True
 
@@ -123,6 +133,7 @@ class Settings(BaseSettings):
     rabbitmq_max_retries: int = 3
     rabbitmq_processing_timeout_seconds: int = 1800
     rag_ingest_concurrency: int = 3
+    vector_upsert_batch_size: int = 256
 
     java_callback_base_url: str | None = None
     java_callback_path: str = "/api/documents/internal/status"

@@ -207,13 +207,17 @@ public class DocumentService {
         if (document == null) {
             throw new BizException(404, "Document task not found.");
         }
-        document.setStatus(normalizeStatus(request.status()));
+        LambdaUpdateWrapper<DocumentFile> update = new LambdaUpdateWrapper<DocumentFile>()
+            .eq(DocumentFile::getId, document.getId())
+            .eq(DocumentFile::getTenantId, document.getTenantId())
+            .eq(DocumentFile::getDeleted, 0)
+            .set(DocumentFile::getStatus, normalizeStatus(request.status()))
+            .set(DocumentFile::getErrorMessage, StringUtils.hasText(request.errorMessage()) ? request.errorMessage() : null)
+            .set(DocumentFile::getUpdatedAt, LocalDateTime.now());
         if (request.chunkCount() != null) {
-            document.setChunkCount(request.chunkCount());
+            update.set(DocumentFile::getChunkCount, request.chunkCount());
         }
-        document.setErrorMessage(StringUtils.hasText(request.errorMessage()) ? request.errorMessage() : null);
-        document.setUpdatedAt(LocalDateTime.now());
-        documentFileMapper.updateById(document);
+        documentFileMapper.update(null, update);
     }
 
     private KnowledgeBase findOrCreateKnowledgeBase(Long tenantId, Long groupId, String name) {

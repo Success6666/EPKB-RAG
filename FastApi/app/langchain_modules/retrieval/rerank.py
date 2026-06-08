@@ -7,7 +7,7 @@ from typing import Protocol
 import httpx
 
 from app.core.config import Settings
-from app.langchain_modules.retrieval.scoring import keyword_score, tokenize
+from app.langchain_modules.retrieval.scoring import keyword_score, phrase_search_terms, tokenize
 from app.schemas.rag import RetrievalHit
 
 logger = logging.getLogger(__name__)
@@ -298,12 +298,13 @@ def lexical_overlap_score(query: str, hit: RetrievalHit) -> float:
     coverage = matched / max(len(query_terms), 1)
     weighted_frequency = min(keyword_score(list(query_terms), text) / 3.0, 1.0)
     exact_bonus = 0.15 if query.strip() and query.strip().lower() in text else 0.0
-    return min(1.0, 0.65 * coverage + 0.35 * weighted_frequency + exact_bonus)
+    phrase_bonus = 0.2 if any(len(term) >= 4 and term in text for term in phrase_search_terms(query)) else 0.0
+    return min(1.0, 0.65 * coverage + 0.35 * weighted_frequency + exact_bonus + phrase_bonus)
 
 
 def lexical_query_terms(query: str) -> list[str]:
     expanded = re.sub(r"[/\\|,;:，；、()\[\]{}<>]", " ", query)
-    return list(dict.fromkeys([*tokenize(query), *tokenize(expanded)]))
+    return list(dict.fromkeys([*phrase_search_terms(query), *tokenize(query), *tokenize(expanded)]))
 
 
 def has_any_positive(values: list[float]) -> bool:

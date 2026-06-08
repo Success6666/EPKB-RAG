@@ -54,20 +54,27 @@ class VectorStore(ABC):
 
 
 class LangChainChromaVectorStore(VectorStore):
-    def __init__(self, persist_dir: str, embeddings: EmbeddingProvider) -> None:
+    def __init__(self, persist_dir: str, embeddings: EmbeddingProvider, upsert_batch_size: int) -> None:
         self.persist_dir = persist_dir
         self.embeddings = embeddings
+        self.upsert_batch_size = max(int(upsert_batch_size), 1)
         self._stores = {}
 
     def upsert_chunks(self, scope: KnowledgeBaseScope, chunks: list[dict[str, Any]]) -> None:
         if not chunks:
             return
         store = self._store(scope)
-        delete_chroma_document(store, scope, chunk_doc_id(chunks))
-        store.add_documents(
-            documents=[to_document(chunk, scope) for chunk in chunks],
-            ids=[chunk["id"] for chunk in chunks],
-        )
+        doc_id = chunk_doc_id(chunks)
+        delete_chroma_document(store, scope, doc_id)
+        try:
+            for batch in batched(chunks, self.upsert_batch_size):
+                store.add_documents(
+                    documents=[to_document(chunk, scope) for chunk in batch],
+                    ids=[chunk["id"] for chunk in batch],
+                )
+        except Exception:
+            delete_chroma_document(store, scope, doc_id)
+            raise
 
     def similarity_search(
         self,
@@ -133,11 +140,18 @@ class LangChainMilvusVectorStore(VectorStore):
         if not chunks:
             return
         store = self._store(scope)
-        delete_milvus_document(store, scope, chunk_doc_id(chunks))
-        store.add_documents(
-            documents=[to_document(chunk, scope) for chunk in chunks],
-            ids=[chunk["id"] for chunk in chunks],
-        )
+        doc_id = chunk_doc_id(chunks)
+        delete_milvus_document(store, scope, doc_id)
+        batch_size = max(int(self.settings.vector_upsert_batch_size), 1)
+        try:
+            for batch in batched(chunks, batch_size):
+                store.add_documents(
+                    documents=[to_document(chunk, scope) for chunk in batch],
+                    ids=[chunk["id"] for chunk in batch],
+                )
+        except Exception:
+            delete_milvus_document(store, scope, doc_id)
+            raise
 
     def similarity_search(
         self,
@@ -151,6 +165,7 @@ class LangChainMilvusVectorStore(VectorStore):
         results = store.similarity_search_with_score(
             query=query,
             k=top_k,
+            param=milvus_search_params(self.settings, top_k),
             expr=milvus_filter(scope, metadata_filter),
         )
         return [
@@ -192,7 +207,7 @@ class LangChainMilvusVectorStore(VectorStore):
     def _store(self, scope: KnowledgeBaseScope):
         key = collection_name(scope)
         if key not in self._stores:
-            from langchain_community.vectorstores import Milvus
+            from langchain_community.vectorstores.milvus import Milvus
 
             self._stores[key] = Milvus(
                 embedding_function=self.embeddings.embeddings,
@@ -211,7 +226,7 @@ class LangChainMilvusVectorStore(VectorStore):
 def create_vector_store(settings: Settings, embeddings: EmbeddingProvider) -> VectorStore:
     store = settings.vector_store.lower()
     if store == "chroma":
-        return LangChainChromaVectorStore(settings.chroma_persist_dir, embeddings)
+        return LangChainChromaVectorStore(settings.chroma_persist_dir, embeddings, settings.vector_upsert_batch_size)
     if store in {"milvus", "milvus_with_keyword_fallback"}:
         return LangChainMilvusVectorStore(settings, embeddings)
     raise ValueError(f"Unsupported vector store: {settings.vector_store}")
@@ -227,6 +242,11 @@ def to_document(chunk: dict[str, Any], scope: KnowledgeBaseScope) -> Document:
         }
     )
     return Document(page_content=chunk["text"], metadata=metadata)
+
+
+def batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+    size = max(int(batch_size), 1)
+    return [items[start:start + size] for start in range(0, len(items), size)]
 
 
 def from_document(document: Document, score: float, extra_metadata: dict[str, Any] | None = None) -> VectorSearchResult:
@@ -295,11 +315,14 @@ def milvus_index_params(settings: Settings) -> dict[str, Any]:
     return {"metric_type": metric_type, "index_type": index_type, "params": {}}
 
 
-def milvus_search_params(settings: Settings) -> dict[str, Any]:
+def milvus_search_params(settings: Settings, top_k: int | None = None) -> dict[str, Any]:
     metric_type = normalize_milvus_metric_type(settings.milvus_metric_type)
     index_type = (settings.milvus_index_type or "HNSW").strip().upper()
     if index_type == "HNSW":
-        return {"metric_type": metric_type, "params": {"ef": max(int(settings.milvus_search_ef), 16)}}
+        ef = max(int(settings.milvus_search_ef), 16)
+        if top_k is not None:
+            ef = max(ef, int(top_k) + 16)
+        return {"metric_type": metric_type, "params": {"ef": ef}}
     return {"metric_type": metric_type, "params": {}}
 
 

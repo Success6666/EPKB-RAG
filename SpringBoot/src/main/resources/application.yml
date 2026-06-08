@@ -12,9 +12,9 @@ spring:
     name: enterprise-rag-platform
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/rag_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: root
-    password: root
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/rag_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}
+    username: ${SPRING_DATASOURCE_USERNAME:rag_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
     hikari:
       maximum-pool-size: ${SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE:5}
       minimum-idle: ${SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE:1}
@@ -29,9 +29,10 @@ spring:
     validate-on-migrate: true
   data:
     redis:
-      host: localhost
-      port: 6379
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
       database: 0
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
       timeout: 3s
   rabbitmq:
     host: localhost

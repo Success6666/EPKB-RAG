@@ -11,9 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import Settings
 from app.langchain_modules.model_io.generation import normalize_provider
@@ -53,6 +51,8 @@ class TextSection:
 
 class DocumentProcessor:
     def __init__(self, settings: Settings) -> None:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+
         self.settings = settings
         self._ocr_engine = None
         self._ocr_llm_available: bool | None = None
@@ -112,7 +112,7 @@ class DocumentProcessor:
                 )
             )
 
-            child_splits = self.child_splitter.split_documents([parent])
+            child_splits = self._semantic_child_splits(parent)
             for child_index, child in enumerate(child_splits):
                 child_text = child.page_content
                 child_id = uuid5(
@@ -128,6 +128,14 @@ class DocumentProcessor:
                 )
 
         return chunks
+
+    def _semantic_child_splits(self, parent: Document) -> list[Document]:
+        texts = semantic_child_split_text(
+            parent.page_content,
+            max_chars=self.settings.child_chunk_size,
+            overlap_chars=self.settings.child_chunk_overlap,
+        )
+        return [Document(page_content=text, metadata={**parent.metadata}) for text in texts]
 
     def _metadata(
         self,
@@ -175,11 +183,15 @@ class DocumentProcessor:
 
         suffix = path.suffix.lower()
         if suffix == ".pdf":
+            from langchain_community.document_loaders import PyPDFLoader
+
             documents = PyPDFLoader(str(path)).load()
             return documents + self._load_pdf_ocr(path, documents)
         if suffix == ".doc":
             return self._load_doc(path)
         if suffix == ".docx":
+            from langchain_community.document_loaders import Docx2txtLoader
+
             documents = Docx2txtLoader(str(path)).load()
             documents.extend(self._load_docx_image_ocr(path))
             return documents
@@ -187,6 +199,8 @@ class DocumentProcessor:
             return self._load_csv(path)
         if suffix in {".xls", ".xlsx"}:
             return self._load_excel(path)
+        from langchain_community.document_loaders import TextLoader
+
         return TextLoader(str(path), encoding="utf-8", autodetect_encoding=True).load()
 
     def _load_doc(self, path: Path) -> list[Document]:
@@ -826,7 +840,7 @@ def first_line(text: str) -> str:
 
 HEADING_PATTERN = re.compile(
     r"(?m)^(?P<head>\s*(?:#{1,6}\s+|"
-    r"\u7b2c[\u4e00-\u9fff0-9]+[\u7ae0\u8282\u7bc7\u90e8]\s*|"
+    r"\u7b2c[\u4e00-\u9fff0-9]+[\u7ae0\u8282\u7bc7\u90e8\u6761\u6b3e]\s*|"
     r"[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07]+[\u3001.\uff0e]\s*|"
     r"[0-9]+(?:[.\uff0e][0-9]+)*[\u3001.\uff0e)\uff09\s]+).{1,160})$"
 )
@@ -867,6 +881,8 @@ def heading_level(value: str) -> int:
         return 1
     if re.match(r"\s*\u7b2c.+\u8282", value):
         return 2
+    if re.match(r"\s*\u7b2c.+[\u6761\u6b3e]", value):
+        return 3
     return max(2, min(value.count(".") + value.count("\uff0e") + 1, 6))
 
 
@@ -876,6 +892,158 @@ def clean_heading(value: str) -> str:
 
 def is_table_separator(value: str) -> bool:
     return bool(re.fullmatch(r"\s*\|?[\s:|\-]+\|?\s*", value or ""))
+
+
+def semantic_child_split_text(text: str, max_chars: int, overlap_chars: int = 0) -> list[str]:
+    max_chars = max(int(max_chars or 0), 1)
+    overlap_budget = min(max(int(overlap_chars or 0), 0), max_chars // 3)
+    units = semantic_text_units(text, max_chars)
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for unit in units:
+        if len(unit) > max_chars:
+            flush_semantic_chunk(chunks, current)
+            current = []
+            chunks.extend(hard_split_text(unit, max_chars, overlap_budget))
+            continue
+
+        if current and semantic_join_length(current + [unit]) > max_chars:
+            flush_semantic_chunk(chunks, current)
+            current = trailing_overlap_units(current, overlap_budget)
+            if current and semantic_join_length(current + [unit]) > max_chars:
+                current = []
+        current.append(unit)
+
+    flush_semantic_chunk(chunks, current)
+    return chunks
+
+
+def semantic_text_units(text: str, max_chars: int) -> list[str]:
+    normalized = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+    if not normalized:
+        return []
+
+    units: list[str] = []
+    for paragraph in [part.strip() for part in re.split(r"\n\s*\n+", normalized) if part.strip()]:
+        paragraph = normalize_semantic_paragraph(paragraph)
+        if len(paragraph) <= max_chars:
+            units.append(paragraph)
+            continue
+        units.extend(split_semantic_paragraph(paragraph, max_chars))
+    return units
+
+
+def normalize_semantic_paragraph(paragraph: str) -> str:
+    lines = [re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in paragraph.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
+def split_semantic_paragraph(paragraph: str, max_chars: int) -> list[str]:
+    lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+    if len(lines) > 1:
+        units = group_heading_lines(lines, max_chars)
+        if all(len(unit) <= max_chars for unit in units):
+            return units
+
+    sentences = split_sentences(paragraph)
+    units: list[str] = []
+    for sentence in sentences:
+        units.append(sentence)
+    return units
+
+
+def group_heading_lines(lines: list[str], max_chars: int) -> list[str]:
+    units: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if is_heading_line(line) and index + 1 < len(lines):
+            combined = f"{line}\n{lines[index + 1]}"
+            if len(combined) <= max_chars:
+                units.append(combined)
+                index += 2
+                continue
+        units.append(line)
+        index += 1
+    return units
+
+
+def is_heading_line(line: str) -> bool:
+    return bool(HEADING_PATTERN.match(line.strip()))
+
+
+def split_sentences(paragraph: str) -> list[str]:
+    parts = re.split(r"([。！？；;.!?]+[\"')\]\}）】》”’]*\s*)", paragraph)
+    sentences: list[str] = []
+    current = ""
+    for part in parts:
+        if not part:
+            continue
+        current += part
+        if re.fullmatch(r"[。！？；;.!?]+[\"')\]\}）】》”’]*\s*", part):
+            sentence = current.strip()
+            if sentence:
+                sentences.append(sentence)
+            current = ""
+    tail = current.strip()
+    if tail:
+        sentences.append(tail)
+    return sentences or [paragraph.strip()]
+
+
+def hard_split_text(text: str, max_chars: int, overlap_chars: int) -> list[str]:
+    chunks: list[str] = []
+    start = 0
+    value = str(text or "").strip()
+    while start < len(value):
+        end = min(start + max_chars, len(value))
+        if end < len(value):
+            boundary = last_soft_boundary(value, start + max_chars // 2, end)
+            if boundary > start:
+                end = boundary
+        chunk = value[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(value):
+            break
+        start = max(end - overlap_chars, start + 1)
+    return chunks
+
+
+def last_soft_boundary(text: str, start: int, end: int) -> int:
+    for index in range(end - 1, start - 1, -1):
+        if text[index] in "\n 。！？；;,.!?，、":
+            return index + 1
+    return end
+
+
+def flush_semantic_chunk(chunks: list[str], current: list[str]) -> None:
+    if current:
+        chunk = "\n\n".join(current).strip()
+        if chunk:
+            chunks.append(chunk)
+
+
+def semantic_join_length(units: list[str]) -> int:
+    if not units:
+        return 0
+    return sum(len(unit) for unit in units) + 2 * (len(units) - 1)
+
+
+def trailing_overlap_units(units: list[str], overlap_chars: int) -> list[str]:
+    if overlap_chars <= 0:
+        return []
+    selected: list[str] = []
+    for unit in reversed(units):
+        candidate = [unit, *selected]
+        if semantic_join_length(candidate) > overlap_chars:
+            break
+        selected = candidate
+    return selected
 
 
 def normalize_ocr_text(text: str) -> str:

@@ -25,6 +25,10 @@ public class TenantInterceptor implements HandlerInterceptor {
         if (isPublicPath(request.getRequestURI())) {
             return true;
         }
+        if (!StpUtil.isLogin()) {
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Login required.");
+            return false;
+        }
         Long tenantId;
         Long groupId;
         try {
@@ -39,10 +43,6 @@ public class TenantInterceptor implements HandlerInterceptor {
         }
         if (tenantId == null) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Missing tenant header: " + ragProperties.getTenant().getHeaderName());
-            return false;
-        }
-        if (!StpUtil.isLogin()) {
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Login required.");
             return false;
         }
         UserTenantMembership membership = membershipService.findActiveMembership(StpUtil.getLoginIdAsLong(), tenantId).orElse(null);

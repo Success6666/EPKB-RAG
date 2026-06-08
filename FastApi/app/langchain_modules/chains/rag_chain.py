@@ -2,13 +2,13 @@ import asyncio
 import logging
 import re
 import time
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from app.core.config import Settings
 from app.schemas.rag import Citation, RetrievalHit, RetrievalQuery, RetrievalResponse
 from app.langchain_modules.model_io.generation import OllamaGenerationClient
 from app.langchain_modules.retrieval.rerank import Reranker, create_reranker
-from app.langchain_modules.retrieval.scoring import keyword_score, normalize_scores, tokenize
+from app.langchain_modules.retrieval.scoring import keyword_score, normalize_scores, phrase_search_terms, tokenize
 from app.langchain_modules.retrieval.vector_store import KnowledgeBaseScope, VectorSearchResult, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,14 @@ class KeywordSearchRepository(Protocol):
     ) -> dict[str, VectorSearchResult]:
         ...
 
+    async def parent_chunks_for_documents(
+        self,
+        scope: KnowledgeBaseScope,
+        doc_ids: list[str],
+        metadata_filter: dict | None = None,
+    ) -> dict[str, list[VectorSearchResult]]:
+        ...
+
 
 class HybridRetrievalService:
     def __init__(
@@ -71,6 +79,7 @@ class HybridRetrievalService:
         rerank_api_key: str | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        expand_full_document_context: bool = True,
     ) -> RetrievalResponse:
         scope = KnowledgeBaseScope(tenant_id=request.tenant_id, kb_id=request.kb_id)
         child_filter = {**request.metadata_filter, "chunk_type": "child"}
@@ -121,6 +130,7 @@ class HybridRetrievalService:
             )
 
         child_hits = self._merge_results(
+            request.query,
             vector_results,
             keyword_results,
             candidate_top_k,
@@ -143,6 +153,13 @@ class HybridRetrievalService:
         )
         threshold = request.score_threshold if request.score_threshold is not None else self.settings.hallucination_min_score
         trusted_hits = [hit for hit in hits if hit.score >= threshold]
+        if expand_full_document_context:
+            trusted_hits = await self._expand_template_hits_to_full_documents(
+                request.query,
+                trusted_hits,
+                request.metadata_filter,
+                {request.kb_id: scope},
+            )
         answer_hits = (
             await self._refine_context_for_llm(request.query, trusted_hits, provider, model, base_url, api_key, temperature, top_p)
             if request.include_answer
@@ -219,12 +236,14 @@ class HybridRetrievalService:
                 rerank_api_key=effective_rerank_api_key,
                 temperature=temperature,
                 top_p=top_p,
+                expand_full_document_context=False,
             )
             hits.extend(response.hits)
             warnings.extend(response.warnings)
             rerank_ms += response.rerank_ms
 
         merged_hits = dedupe_hits(hits, max(request.top_k * self.settings.child_chunks_per_parent, request.top_k))
+        scopes_by_kb_id = {kb_id: KnowledgeBaseScope(tenant_id=request.tenant_id, kb_id=kb_id) for kb_id in scoped_ids}
         merged_hits, cross_kb_rerank_ms = await self._rerank_hits(
             request.query,
             merged_hits,
@@ -236,6 +255,12 @@ class HybridRetrievalService:
         rerank_ms += cross_kb_rerank_ms
         threshold = request.score_threshold if request.score_threshold is not None else self.settings.hallucination_min_score
         trusted_hits = [hit for hit in merged_hits if hit.score >= threshold]
+        trusted_hits = await self._expand_template_hits_to_full_documents(
+            request.query,
+            trusted_hits,
+            request.metadata_filter,
+            scopes_by_kb_id,
+        )
         answer_hits = (
             await self._refine_context_for_llm(request.query, trusted_hits, provider, model, base_url, api_key, temperature, top_p)
             if request.include_answer
@@ -484,8 +509,74 @@ class HybridRetrievalService:
                             "matched_child_id": seed_child.chunk_id,
                         },
                     )
-                )
+            )
         return sorted(dedupe_hits(selected, max(top_k * self.settings.child_chunks_per_parent, top_k)), key=lambda hit: hit.score, reverse=True)
+
+    async def _expand_template_hits_to_full_documents(
+        self,
+        query: str,
+        hits: list[RetrievalHit],
+        metadata_filter: dict,
+        scopes_by_kb_id: dict[str, KnowledgeBaseScope],
+    ) -> list[RetrievalHit]:
+        if not should_use_full_document_context(query, self.settings) or not hits:
+            return hits
+
+        candidates = full_document_candidates(
+            hits,
+            max_docs=self.settings.full_document_context_max_docs,
+            min_score=self.settings.full_document_context_min_score,
+        )
+        if not candidates:
+            return hits
+
+        total_remaining = max(int(self.settings.full_document_context_max_chars), 0)
+        full_context_hits: list[RetrievalHit] = []
+        for candidate in candidates:
+            if total_remaining <= 0:
+                break
+            scope = scopes_by_kb_id.get(candidate["kb_id"])
+            if scope is None:
+                continue
+            grouped_parent_chunks = await self.mysql_repository.parent_chunks_for_documents(
+                scope,
+                [candidate["doc_id"]],
+                parent_context_filter(metadata_filter),
+            )
+            parent_chunks = grouped_parent_chunks.get(candidate["doc_id"]) or []
+            text, truncated = join_parent_chunks(parent_chunks, total_remaining)
+            if not text:
+                continue
+            source = parent_chunks[0] if parent_chunks else candidate["hit"]
+            metadata = {
+                **source.metadata,
+                "retrieval_strategy": "full_document_context",
+                "full_document_context": True,
+                "full_document_truncated": truncated,
+                "source_hit_count": candidate["source_hit_count"],
+            }
+            full_context_hits.append(
+                RetrievalHit(
+                    chunkId=f"full-document-{candidate['kb_id']}-{candidate['doc_id']}",
+                    text=text,
+                    score=candidate["score"],
+                    vectorScore=candidate["hit"].vector_score,
+                    keywordScore=candidate["hit"].keyword_score,
+                    citation=Citation(
+                        docId=source.metadata.get("doc_id") or candidate["doc_id"],
+                        chunkId=source.chunk_id,
+                        fileName=source.metadata.get("file_name"),
+                        sourceUri=source.metadata.get("source_uri"),
+                        page=source.metadata.get("page"),
+                    ),
+                    metadata=metadata,
+                )
+            )
+            total_remaining -= len(text)
+
+        if not full_context_hits:
+            return hits
+        return dedupe_hits(full_context_hits + hits, len(full_context_hits) + len(hits))
 
     async def _refine_context_for_llm(
         self,
@@ -500,7 +591,11 @@ class HybridRetrievalService:
     ) -> list[RetrievalHit]:
         if not hits or not self.settings.llm_context_refinement_enabled:
             return hits
-        scoped_hits = hits[: self.settings.llm_context_refinement_max_hits]
+        full_context_hits = [hit for hit in hits if is_full_document_context_hit(hit)]
+        refinable_hits = [hit for hit in hits if not is_full_document_context_hit(hit)]
+        if not refinable_hits:
+            return hits
+        scoped_hits = refinable_hits[: self.settings.llm_context_refinement_max_hits]
         try:
             refined_texts = await self.generator.refine_context(
                 query,
@@ -514,10 +609,10 @@ class HybridRetrievalService:
             )
         except Exception as exc:
             logger.warning("LLM context refinement failed, using local compaction: %s", exc)
-            return [compact_hit(hit) for hit in hits]
+            return full_context_hits + [compact_hit(hit) for hit in refinable_hits]
 
         if not refined_texts:
-            return [compact_hit(hit) for hit in hits]
+            return full_context_hits + [compact_hit(hit) for hit in refinable_hits]
 
         refined_hits: list[RetrievalHit] = []
         for hit, refined_text in zip(scoped_hits, refined_texts):
@@ -535,12 +630,13 @@ class HybridRetrievalService:
                     metadata={**hit.metadata, "context_refined": True},
                 )
             )
-        if len(hits) > len(refined_hits):
-            refined_hits.extend(compact_hit(hit) for hit in hits[len(refined_hits):])
-        return refined_hits
+        if len(refinable_hits) > len(refined_hits):
+            refined_hits.extend(compact_hit(hit) for hit in refinable_hits[len(refined_hits):])
+        return full_context_hits + refined_hits
 
     def _merge_results(
         self,
+        query: str,
         vector_results: list[VectorSearchResult],
         keyword_results: list[VectorSearchResult],
         top_k: int,
@@ -577,6 +673,7 @@ class HybridRetrievalService:
                 combined = self.settings.vector_weight * (vector_score or 0.0) + self.settings.keyword_weight * (keyword or 0.0)
                 combined += reciprocal_rank_bonus(entry)
                 combined += metadata_boost(result.metadata, self.settings.metadata_boost_weight) if self.settings.metadata_boost_enabled else 0.0
+                combined += exact_phrase_boost(query, result)
             metadata = result.metadata
             hits.append(
                 RetrievalHit(
@@ -627,13 +724,15 @@ def parent_candidate_top_k(top_k: int, settings: Settings) -> int:
     if not settings.rerank_enabled:
         return top_k
     per_parent = max(settings.child_chunks_per_parent, 1)
-    return max(top_k, min(settings.rerank_top_n, top_k * max(settings.retrieval_candidate_multiplier, 1)) // per_parent)
+    rerank_parent_floor = (max(settings.rerank_top_n, 0) + per_parent - 1) // per_parent
+    expanded_parent_top_k = min(max(settings.rerank_top_n, 0), top_k * max(settings.retrieval_candidate_multiplier, 1))
+    return max(top_k, rerank_parent_floor, expanded_parent_top_k)
 
 
 def expanded_search_queries(original_query: str, retrieval_query: str, max_queries: int) -> list[str]:
     if max_queries <= 1:
         return list(dict.fromkeys(query for query in [retrieval_query, original_query] if query))[:1]
-    queries = [retrieval_query, original_query]
+    queries = [retrieval_query, original_query, *phrase_search_terms(original_query), *phrase_search_terms(retrieval_query)]
     for token in query_keywords(f"{original_query} {retrieval_query}"):
         queries.append(token)
     return list(dict.fromkeys(query for query in queries if query))[: max(max_queries, 1)]
@@ -690,8 +789,173 @@ def metadata_boost(metadata: dict, weight: float) -> float:
     return min(max(weight, 0.0), 0.5) * min(present / 4.0, 1.0)
 
 
+def exact_phrase_boost(query: str, result: VectorSearchResult) -> float:
+    phrases = phrase_search_terms(query)
+    if not phrases:
+        return 0.0
+    metadata = result.metadata or {}
+    haystack = normalize_query_text(
+        "\n".join(
+            str(part or "")
+            for part in (
+                metadata.get("file_name"),
+                metadata.get("section_title"),
+                metadata.get("section_path"),
+                metadata.get("keywords"),
+                result.text,
+            )
+        )
+    )
+    if not haystack:
+        return 0.0
+
+    best = 0.0
+    for phrase in phrases:
+        compact = normalize_query_text(phrase)
+        if len(compact) < 4 or compact not in haystack:
+            continue
+        best = max(best, 0.65 if len(compact) >= 8 else 0.35)
+    return best
+
+
 def parent_context_filter(metadata_filter: dict) -> dict:
     return {key: value for key, value in (metadata_filter or {}).items() if key != "chunk_type"}
+
+
+def should_use_full_document_context(query: str, settings: Settings) -> bool:
+    if not settings.full_document_context_enabled:
+        return False
+    normalized = normalize_query_text(query)
+    if not normalized:
+        return False
+
+    explicit_template_terms = {
+        "\u6837\u672c",
+        "\u8303\u672c",
+        "\u6a21\u677f",
+        "\u793a\u4f8b",
+        "\u683c\u5f0f",
+        "\u6a21\u7248",
+        "\u53c2\u8003\u4ef6",
+        "sample",
+        "template",
+        "example",
+        "boilerplate",
+    }
+    draft_actions = {
+        "\u62df",
+        "\u8d77\u8349",
+        "\u64b0\u5199",
+        "\u7f16\u5199",
+        "\u751f\u6210",
+        "\u5199\u4e00",
+        "\u7ed9\u6211\u4e00\u4efd",
+        "draft",
+        "write",
+        "create",
+    }
+    whole_document_terms = {
+        "\u627e\u4e00\u4efd",
+        "\u67e5\u627e\u4e00\u4efd",
+        "\u7ed9\u6211\u4e00\u4efd",
+        "\u53c2\u8003",
+        "\u5b8c\u6574",
+        "\u5168\u6587",
+        "\u6574\u4efd",
+        "\u6574\u7bc7",
+        "\u539f\u6587",
+        "complete",
+        "full",
+        "find",
+        "search",
+        "reference",
+    }
+    document_terms = {
+        "\u5408\u540c",
+        "\u534f\u8bae",
+        "\u6587\u4e66",
+        "\u6807\u4e66",
+        "\u62db\u6807\u6587\u4ef6",
+        "\u6295\u6807\u6587\u4ef6",
+        "\u7ae0\u7a0b",
+        "\u5236\u5ea6",
+        "contract",
+        "agreement",
+        "proposal",
+        "tender",
+    }
+
+    has_template_term = any(term in normalized for term in explicit_template_terms)
+    has_action = any(term in normalized for term in draft_actions)
+    has_whole_document_term = any(term in normalized for term in whole_document_terms)
+    has_document_term = any(term in normalized for term in document_terms)
+    return has_template_term or (has_document_term and (has_action or has_whole_document_term))
+
+
+def normalize_query_text(query: str) -> str:
+    return re.sub(r"\s+", "", str(query or "")).lower()
+
+
+def full_document_candidates(
+    hits: list[RetrievalHit],
+    max_docs: int,
+    min_score: float,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for hit in hits:
+        doc_id = str(hit.metadata.get("doc_id") or hit.citation.doc_id or "")
+        kb_id = str(hit.metadata.get("kb_id") or "")
+        if not doc_id or not kb_id or hit.score < min_score:
+            continue
+        key = (kb_id, doc_id)
+        entry = grouped.get(key)
+        if entry is None:
+            grouped[key] = {
+                "kb_id": kb_id,
+                "doc_id": doc_id,
+                "hit": hit,
+                "score": hit.score,
+                "source_hit_count": 1,
+            }
+            continue
+        entry["source_hit_count"] += 1
+        if hit.score > entry["score"]:
+            entry["hit"] = hit
+            entry["score"] = hit.score
+    ranked = sorted(
+        grouped.values(),
+        key=lambda item: (float(item["score"]), int(item["source_hit_count"])),
+        reverse=True,
+    )
+    return ranked[: max(max_docs, 0)]
+
+
+def join_parent_chunks(parent_chunks: list[VectorSearchResult], max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", True
+    parts: list[str] = []
+    used = 0
+    truncated = False
+    for chunk in sorted(parent_chunks, key=lambda item: int(item.metadata.get("chunk_index") or 0)):
+        text = str(chunk.text or "").strip()
+        if not text:
+            continue
+        separator = "\n\n" if parts else ""
+        required = len(separator) + len(text)
+        if used + required <= max_chars:
+            parts.append(f"{separator}{text}")
+            used += required
+            continue
+        remaining = max_chars - used - len(separator)
+        if remaining > 0:
+            parts.append(f"{separator}{text[:remaining].rstrip()}")
+        truncated = True
+        break
+    return "".join(parts).strip(), truncated
+
+
+def is_full_document_context_hit(hit: RetrievalHit) -> bool:
+    return bool(hit.metadata.get("full_document_context"))
 
 
 def compact_hit(hit: RetrievalHit) -> RetrievalHit:

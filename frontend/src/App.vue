@@ -794,6 +794,7 @@ const streamControllers = new Map()
 const notifiedFailedTaskIds = new Set()
 let taskRefreshTimer = null
 let streamGeneration = 0
+let authFailureHandled = false
 
 const currentTenant = computed(() => tenants.value.find((tenant) => String(tenant.id) === String(session.tenantId)))
 const currentTenantRole = computed(() => normalizeRole(currentTenant.value?.role))
@@ -934,6 +935,7 @@ async function register() {
 }
 
 async function applyAuthPayload(data) {
+  authFailureHandled = false
   session.token = data.token
   session.user = data.user
   tenants.value = data.tenants || []
@@ -945,7 +947,8 @@ async function applyAuthPayload(data) {
   userMenuOpen.value = false
 }
 
-function logout() {
+function logout(options = {}) {
+  const { nextView = 'chat' } = options
   cancelActiveStreams()
   clearConversationState()
   resetLoginForm()
@@ -969,7 +972,7 @@ function logout() {
   window.localStorage.removeItem('rag_tenant')
   window.localStorage.removeItem('rag_user')
   setAuthContext(session)
-  view.value = 'chat'
+  view.value = nextView
 }
 
 function resetLoginForm() {
@@ -1000,6 +1003,9 @@ async function bootstrapAfterLogin() {
         session.tenantId = String(tenants.value[0]?.id || '')
       }
     } catch (error) {
+      if (isUnauthorized(error)) {
+        throw error
+      }
       if (!isPlatformAdmin.value) {
         throw error
       }
@@ -1045,7 +1051,8 @@ async function loadTasks(options = {}) {
   } catch (error) {
     if (isUnauthorized(error)) {
       tasks.value = []
-      throw error
+      handleAuthFailure(error)
+      return
     }
     if (!silent) {
       tasks.value = []
@@ -1163,6 +1170,10 @@ async function loadModels() {
     const data = await ragClient.listModels()
     models.value = data.items || []
   } catch (error) {
+    if (isUnauthorized(error)) {
+      handleAuthFailure(error)
+      return
+    }
     models.value = []
     ElMessage.warning(`模型配置加载失败：${friendlyError(error)}`)
   }
@@ -1177,6 +1188,10 @@ async function loadEmployees() {
     const data = await ragClient.listEmployees()
     employees.value = data.items || []
   } catch (error) {
+    if (isUnauthorized(error)) {
+      handleAuthFailure(error)
+      return
+    }
     employees.value = []
     ElMessage.warning(`员工列表加载失败：${friendlyError(error)}`)
   }
@@ -1204,6 +1219,10 @@ async function loadCompanies() {
     const data = await ragClient.listCompanies()
     companies.value = data.items || []
   } catch (error) {
+    if (isUnauthorized(error)) {
+      handleAuthFailure(error)
+      return
+    }
     companies.value = []
     ElMessage.warning(`企业列表加载失败：${friendlyError(error)}`)
   }
@@ -1570,7 +1589,7 @@ async function askQuestion() {
         message.reasoningStreaming = false
         message.statusText = ''
       })
-      view.value = 'login'
+      handleAuthFailure(error)
     } else if (isMissingSession(error)) {
       clearMissingSession(requestSessionId, { reset: false })
       patchConversationMessage(streamKey, assistantMessageId, (message) => {
@@ -1945,7 +1964,12 @@ function resizeComposer(event) {
 
 function handleAuthFailure(error) {
   if (isUnauthorized(error)) {
-    logout()
+    const hadToken = Boolean(session.token)
+    logout({ nextView: 'login' })
+    if (hadToken && !authFailureHandled) {
+      authFailureHandled = true
+      ElMessage.warning('登录已失效，请重新登录')
+    }
     return
   }
   ElMessage.error(friendlyError(error))
