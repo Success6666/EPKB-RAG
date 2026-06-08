@@ -9,7 +9,10 @@ class Settings(BaseSettings):
 
     app_name: str = "Enterprise Private Knowledge Base RAG"
     app_version: str = "0.1.0"
+    app_env: str = "dev"
     api_prefix: str = "/api/v1"
+    internal_api_token: str | None = None
+    internal_api_token_header: str = "X-Internal-Token"
     runtime_gc_enabled: bool = True
     runtime_gc_interval_seconds: int = 300
     runtime_malloc_trim_enabled: bool = True
@@ -142,6 +145,14 @@ class Settings(BaseSettings):
     java_callback_token_header: str = "X-Internal-Token"
     java_callback_timeout_seconds: int = 10
     java_callback_max_attempts: int = 3
+
+    @property
+    def effective_internal_api_token(self) -> str | None:
+        return self.internal_api_token or self.java_callback_token
+
+    @property
+    def is_prod(self) -> bool:
+        return self.app_env.strip().lower() in {"prod", "production"}
 
 
 @lru_cache

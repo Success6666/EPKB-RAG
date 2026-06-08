@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -34,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", default="hybrid", choices=("hybrid", "vector", "keyword"))
     parser.add_argument("--score-threshold", type=float, default=None)
     parser.add_argument("--timeout", type=float, default=45.0)
+    parser.add_argument("--internal-token", default=os.getenv("INTERNAL_API_TOKEN") or os.getenv("JAVA_CALLBACK_TOKEN"))
+    parser.add_argument("--internal-token-header", default="X-Internal-Token")
     parser.add_argument("--skip-health", action="store_true")
     args = parser.parse_args(argv)
 
@@ -50,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
         "content": args.content,
         "metadata": {"category": "smoke", "source": "smoke_rag_e2e"},
     }
-    ingest_response = post_json(f"{base_url}/api/v1/documents/ingest", ingest_payload, args.timeout)
+    headers = internal_headers(args.internal_token, args.internal_token_header)
+    ingest_response = post_json(f"{base_url}/api/v1/documents/ingest", ingest_payload, args.timeout, headers)
     if ingest_response.get("status") not in {"indexed", "deleted"}:
         raise SystemExit(f"Unexpected ingest status: {json.dumps(ingest_response, ensure_ascii=False)}")
     if ingest_response.get("status") == "deleted":
@@ -66,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.score_threshold is not None:
         query_payload["scoreThreshold"] = args.score_threshold
-    query_response = post_json(f"{base_url}/api/v1/rag/query", query_payload, args.timeout)
+    query_response = post_json(f"{base_url}/api/v1/rag/query", query_payload, args.timeout, headers)
     hits = query_response.get("hits") or []
     matching_hits = [hit for hit in hits if hit_doc_id(hit) == args.doc_id]
     if not matching_hits:
@@ -92,11 +96,16 @@ def get_json(url: str, timeout: float) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def post_json(url: str, payload: dict[str, Any], timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urlrequest.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    request = urlrequest.Request(url, data=data, headers=request_headers, method="POST")
     with urlrequest.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def internal_headers(token: str | None, header_name: str) -> dict[str, str]:
+    return {header_name: token} if token else {}
 
 
 def hit_doc_id(hit: dict[str, Any]) -> str | None:

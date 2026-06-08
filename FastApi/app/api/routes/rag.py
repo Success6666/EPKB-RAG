@@ -4,13 +4,14 @@ import logging
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from app.api.internal_auth import require_internal_token
 from app.schemas.rag import ChatAskRequest, ChatAskResponse, ChatCitation, ChatTrace, RetrievalQuery, RetrievalResponse
 from app.services.factory import get_retrieval_service
 
-router = APIRouter(prefix="/rag", tags=["rag"])
+router = APIRouter(prefix="/rag", tags=["rag"], dependencies=[Depends(require_internal_token)])
 logger = logging.getLogger(__name__)
 
 NO_RELIABLE_EVIDENCE_ANSWER = "知识库中没有检索到足够可靠的内容，请补充文档或降低引用阈值后重试。"

@@ -21,17 +21,23 @@ def create_app() -> FastAPI:
             await stop_periodic_gc(gc_task)
             collect_runtime_memory(settings)
 
+    docs_url = None if settings.is_prod else "/docs"
+    redoc_url = None if settings.is_prod else "/redoc"
+    openapi_url = None if settings.is_prod else "/openapi.json"
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description="Multi-tenant private knowledge-base RAG middleware.",
         lifespan=lifespan,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
 
     app.include_router(health.router, prefix=settings.api_prefix)
     app.include_router(documents.router, prefix=settings.api_prefix)
     app.include_router(rag.router, prefix=settings.api_prefix)
-    app.include_router(rag.router)
 
     return app
 

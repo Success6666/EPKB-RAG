@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from tools.evaluate_retrieval import (
     Hit,
@@ -6,6 +7,7 @@ from tools.evaluate_retrieval import (
     evaluate_metric_gates,
     parse_k_values,
     parse_metric_gates,
+    post_json,
     score_item,
     summarize,
 )
@@ -150,6 +152,31 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(metrics.top_hits[0]["score"], 0.0)
         self.assertEqual(metrics.top_hits[0]["vectorScore"], 0.0)
         self.assertEqual(metrics.top_hits[0]["keywordScore"], 0.0)
+
+    def test_post_json_sends_internal_token_header(self):
+        class Response:
+            def __enter__(self):
+                self.status = 200
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["token"] = request.get_header("X-internal-token")
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch("tools.evaluate_retrieval.urlrequest.urlopen", fake_urlopen):
+            post_json("http://example.test/api", {"query": "hello"}, 3.0, {"X-Internal-Token": "secret"})
+
+        self.assertEqual(captured["token"], "secret")
+        self.assertEqual(captured["timeout"], 3.0)
 
     def test_hit_dataclass_accepts_missing_fields(self):
         hit = Hit(doc_id=None, chunk_id=None, parent_id=None)

@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -33,19 +34,22 @@ public class AuthService {
     private final TenantGroupMapper tenantGroupMapper;
     private final UserTenantMembershipMapper membershipMapper;
     private final UserTenantMembershipService membershipService;
+    private final PasswordEncoder passwordEncoder;
 
     public AuthService(
         UserAccountMapper userAccountMapper,
         TenantMapper tenantMapper,
         TenantGroupMapper tenantGroupMapper,
         UserTenantMembershipMapper membershipMapper,
-        UserTenantMembershipService membershipService
+        UserTenantMembershipService membershipService,
+        PasswordEncoder passwordEncoder
     ) {
         this.userAccountMapper = userAccountMapper;
         this.tenantMapper = tenantMapper;
         this.tenantGroupMapper = tenantGroupMapper;
         this.membershipMapper = membershipMapper;
         this.membershipService = membershipService;
+        this.passwordEncoder = passwordEncoder;
     }
 
     public LoginResponse login(LoginRequest request) {
@@ -56,6 +60,7 @@ public class AuthService {
         if (user == null || !passwordMatches(request.password(), user.getPasswordHash())) {
             throw new BizException(401, "Invalid username or password.");
         }
+        upgradeLegacyPasswordHash(user, request.password());
 
         List<UserTenantMembership> memberships = membershipService.listActiveMemberships(user.getId());
         UserTenantMembership defaultMembership = membershipService.selectDefaultMembership(user, memberships).orElse(null);
@@ -94,7 +99,7 @@ public class AuthService {
         user.setTenantId(tenant.getId());
         user.setGroupId(group.getId());
         user.setUsername(username);
-        user.setPasswordHash("{noop}" + request.password());
+        user.setPasswordHash(passwordEncoder.encode(request.password()));
         user.setDisplayName(normalizeRequired(request.displayName(), "Display name is required."));
         user.setRole(SecurityConstants.GLOBAL_USER);
         user.setStatus(1);
@@ -240,6 +245,21 @@ public class AuthService {
         if (stored == null) {
             return false;
         }
-        return stored.equals(raw) || stored.equals("{noop}" + raw);
+        if (stored.startsWith("{noop}")) {
+            return stored.equals("{noop}" + raw);
+        }
+        if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
+            return passwordEncoder.matches(raw, stored);
+        }
+        return false;
+    }
+
+    private void upgradeLegacyPasswordHash(UserAccount user, String rawPassword) {
+        if (user.getPasswordHash() == null || !user.getPasswordHash().startsWith("{noop}")) {
+            return;
+        }
+        user.setPasswordHash(passwordEncoder.encode(rawPassword));
+        user.setUpdatedAt(LocalDateTime.now());
+        userAccountMapper.updateById(user);
     }
 }

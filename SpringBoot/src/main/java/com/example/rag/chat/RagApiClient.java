@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClientException;
 
 @Component
@@ -61,6 +62,7 @@ public class RagApiClient {
             .timeout(Duration.ofSeconds(180))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
+            .header("X-Internal-Token", internalToken())
             .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
             .build();
         try {
@@ -99,6 +101,7 @@ public class RagApiClient {
             .timeout(Duration.ofSeconds(120))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
+            .header("X-Internal-Token", internalToken())
             .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
             .build();
         try {
@@ -242,6 +245,14 @@ public class RagApiClient {
         } catch (JsonProcessingException ex) {
             throw new IllegalArgumentException("Failed to serialize FastAPI chat request.", ex);
         }
+    }
+
+    private String internalToken() {
+        String callbackToken = ragProperties.getInternal().getCallbackToken();
+        if (!StringUtils.hasText(callbackToken)) {
+            throw new RestClientException("JAVA_CALLBACK_TOKEN must be configured before calling FastAPI RAG APIs.");
+        }
+        return callbackToken;
     }
 
     private ChatAskResponse.Trace emptyTrace(Integer topK) {

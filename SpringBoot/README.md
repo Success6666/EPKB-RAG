@@ -23,15 +23,10 @@ mvn package -DskipTests
 
 Flyway runs `src/main/resources/db/migration/V*.sql` automatically on startup. `DatabaseSchemaInitializer` is a disabled-by-default legacy compatibility fallback; enable it only with `RAG_SCHEMA_COMPAT_INITIALIZER_ENABLED=true` when repairing an old environment.
 
-The seed admin from `V1__init.sql` is:
-
-```text
-username: admin@example.com
-password: admin123
-tenant: 1001
-```
-
-Rotate this seed credential before exposing the service beyond local development.
+Do not rely on a public seed admin account. Migration `V8__disable_default_seed_accounts.sql`
+disables the old demo users (`admin@example.com`, `user@example.com`), and new users are
+stored with BCrypt password hashes. Create an administrator through a controlled bootstrap
+process before exposing the service beyond local development.
 
 ## Main APIs
 

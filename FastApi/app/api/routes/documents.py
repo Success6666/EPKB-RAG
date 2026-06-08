@@ -3,13 +3,14 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from app.api.internal_auth import require_internal_token
 from app.core.config import get_settings
 from app.schemas.documents import DocumentIngestJob, DocumentIngestResponse
 from app.services.factory import get_ingestion_service
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(require_internal_token)])
 
 
 @router.post("/ingest", response_model=DocumentIngestResponse)
@@ -24,13 +25,7 @@ async def ingest_document(job: DocumentIngestJob) -> DocumentIngestResponse:
 
 
 @router.delete("/internal", response_model=DocumentIngestResponse)
-async def delete_document(
-    job: DocumentIngestJob,
-    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
-) -> DocumentIngestResponse:
-    settings = get_settings()
-    if not settings.java_callback_token or x_internal_token != settings.java_callback_token:
-        raise HTTPException(status_code=403, detail="Invalid internal token.")
+async def delete_document(job: DocumentIngestJob) -> DocumentIngestResponse:
     try:
         return await get_ingestion_service().delete_document(job)
     except ValueError as exc:

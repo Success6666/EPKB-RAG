@@ -12,7 +12,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "${MYSQL_BIND_HOST:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -35,7 +35,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -55,8 +55,8 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${RABBITMQ_PORT:-5672}:5672"
-      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+      - "${RABBITMQ_BIND_HOST:-127.0.0.1}:${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_BIND_HOST:-127.0.0.1}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -80,8 +80,8 @@ services:
       COMMON_STORAGETYPE: local
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${MILVUS_PORT:-19530}:19530"
-      - "${MILVUS_METRICS_PORT:-9091}:9091"
+      - "${MILVUS_BIND_HOST:-127.0.0.1}:${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_METRICS_BIND_HOST:-127.0.0.1}:${MILVUS_METRICS_PORT:-9091}:9091"
     volumes:
       - milvus_data:/var/lib/milvus
     healthcheck:
@@ -103,7 +103,7 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${CHROMA_PORT:-8001}:8000"
+      - "${CHROMA_BIND_HOST:-127.0.0.1}:${CHROMA_PORT:-8001}:8000"
     volumes:
       - chroma_data:/chroma/chroma
     healthcheck:
@@ -221,6 +221,7 @@ services:
       MYSQL_DSN: ${MYSQL_DSN:?Set MYSQL_DSN in .env}
       JAVA_CALLBACK_BASE_URL: http://springboot:8080
       JAVA_CALLBACK_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
+      INTERNAL_API_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
       REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rag_user}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
       RABBITMQ_QUEUE: ${RABBITMQ_DOCUMENT_QUEUE:-rag.document.ingest}
@@ -319,6 +320,7 @@ services:
       MYSQL_DSN: ${MYSQL_DSN:?Set MYSQL_DSN in .env}
       JAVA_CALLBACK_BASE_URL: http://springboot:8080
       JAVA_CALLBACK_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
+      INTERNAL_API_TOKEN: ${JAVA_CALLBACK_TOKEN:?Set JAVA_CALLBACK_TOKEN in .env}
       REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-rag_user}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
       RABBITMQ_QUEUE: ${RABBITMQ_DOCUMENT_QUEUE:-rag.document.ingest}

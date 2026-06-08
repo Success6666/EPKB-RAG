@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=40, help="topK used when calling --endpoint.")
     parser.add_argument("--mode", default="hybrid", choices=("hybrid", "vector", "keyword"))
     parser.add_argument("--score-threshold", type=float, default=None)
+    parser.add_argument("--internal-token", default=os.getenv("INTERNAL_API_TOKEN") or os.getenv("JAVA_CALLBACK_TOKEN"))
+    parser.add_argument("--internal-token-header", default="X-Internal-Token")
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--k", default="1,3,5,10,20,40", help="Comma-separated K values.")
     args = parser.parse_args(argv)
@@ -94,7 +97,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.results:
         results = load_results(Path(args.results))
     elif args.endpoint:
-        results = fetch_results(gold_items, args.endpoint, args.top_k, args.mode, args.score_threshold, args.timeout)
+        results = fetch_results(
+            gold_items,
+            args.endpoint,
+            args.top_k,
+            args.mode,
+            args.score_threshold,
+            args.timeout,
+            internal_headers(args.internal_token, args.internal_token_header),
+        )
     else:
         raise SystemExit("Either --results or --endpoint is required.")
 
@@ -189,6 +200,7 @@ def fetch_results(
     mode: str,
     score_threshold: float | None,
     timeout: float,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     for item in gold_items:
@@ -204,18 +216,23 @@ def fetch_results(
         if score_threshold is not None:
             payload["scoreThreshold"] = score_threshold
         try:
-            response = post_json(endpoint, payload, timeout)
+            response = post_json(endpoint, payload, timeout, headers)
             results[item.id] = {"id": item.id, "hits": response.get("hits") or [], "raw": response}
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             results[item.id] = {"id": item.id, "hits": [], "error": str(exc)}
     return results
 
 
-def post_json(endpoint: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def post_json(endpoint: str, payload: dict[str, Any], timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urlrequest.Request(endpoint, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    req = urlrequest.Request(endpoint, data=data, headers=request_headers, method="POST")
     with urlrequest.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def internal_headers(token: str | None, header_name: str) -> dict[str, str]:
+    return {header_name: token} if token else {}
 
 
 def score_item(item: GoldItem, result: dict[str, Any], k_values: list[int]) -> ItemMetrics:

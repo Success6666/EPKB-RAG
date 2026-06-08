@@ -42,7 +42,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 健康检查：
@@ -175,6 +175,7 @@ python tools/evaluate_retrieval.py `
   --endpoint http://localhost:8000/api/v1/rag/query `
   --top-k 40 `
   --mode hybrid `
+  --internal-token $env:JAVA_CALLBACK_TOKEN `
   --output eval/retrieval_report.json `
   --failures eval/retrieval_failures.csv `
   --failure-jsonl eval/retrieval_failures.jsonl
@@ -188,6 +189,7 @@ python tools/evaluate_retrieval.py `
 cd E:\AI\FastApi
 python tools/smoke_rag_e2e.py `
   --base-url http://localhost:8000 `
+  --internal-token $env:JAVA_CALLBACK_TOKEN `
   --tenant-id smoke-tenant `
   --kb-id smoke-kb
 ```
