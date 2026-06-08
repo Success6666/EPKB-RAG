@@ -91,7 +91,7 @@ pip install -r requirements.txt -r requirements.worker.txt
 python -m app.workers.rabbitmq_consumer
 ```
 
-消费者使用异步 RabbitMQ 连接，并通过 `RAG_INGEST_CONCURRENCY` 限制并发入库任务数。`RABBITMQ_PREFETCH_COUNT` 应不小于并发数，Docker Compose 默认两者都是 `3`。
+消费者使用异步 RabbitMQ 连接，并通过 `RAG_INGEST_CONCURRENCY` 限制并发入库任务数。`RABBITMQ_PREFETCH_COUNT` 应不小于并发数，Docker Compose 默认两者都是 `1`，低内存机器可保持该默认值。
 
 消息体契约：
 

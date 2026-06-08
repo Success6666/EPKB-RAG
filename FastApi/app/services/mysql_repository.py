@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlparse
@@ -218,13 +219,15 @@ class MySqlRepository:
             return []
 
         keyword_row_groups: list[list[dict[str, Any]]] = []
+        fulltext_rows: list[dict[str, Any]] = []
         if self.settings.mysql_keyword_fulltext_enabled:
             try:
-                keyword_row_groups.append(await self._fulltext_search(scope, query, metadata_filter, top_k))
+                fulltext_rows = await self._fulltext_search(scope, query, metadata_filter, top_k)
+                keyword_row_groups.append(fulltext_rows)
             except aiomysql.MySQLError as exc:
                 logger.warning("MySQL FULLTEXT keyword search failed, continuing with LIKE candidates: %s", exc)
 
-        if self.settings.mysql_keyword_like_fallback_enabled:
+        if should_run_like_fallback(fulltext_rows, top_k, self.settings):
             keyword_row_groups.append(await self._like_search(scope, terms, metadata_filter, max(top_k * 5, top_k)))
 
         rows = merge_keyword_rows(keyword_row_groups)
@@ -578,8 +581,18 @@ class MySqlRepository:
         like_terms = like_search_terms(terms)
         if not like_terms:
             return []
-        where = " OR ".join(["text LIKE %s" for _ in like_terms])
-        score = " + ".join(["CASE WHEN text LIKE %s THEN %s ELSE 0 END" for _ in like_terms])
+        metadata_terms = (
+            like_terms[: max(int(self.settings.mysql_keyword_metadata_like_max_terms), 0)]
+            if self.settings.mysql_keyword_metadata_like_enabled
+            else []
+        )
+        metadata_expr = keyword_metadata_like_expression()
+        score_parts = ["CASE WHEN text LIKE %s THEN %s ELSE 0 END" for _ in like_terms]
+        score_parts.extend([f"CASE WHEN {metadata_expr} LIKE %s THEN %s ELSE 0 END" for _ in metadata_terms])
+        where_parts = ["text LIKE %s" for _ in like_terms]
+        where_parts.extend([f"{metadata_expr} LIKE %s" for _ in metadata_terms])
+        score = " + ".join(score_parts)
+        where = " OR ".join(where_parts)
         sql = f"""
             SELECT chunk_id, tenant_id, kb_id, doc_id, chunk_index, text, metadata, file_name, source_uri, page,
                    ({score}) AS keyword_score
@@ -591,8 +604,11 @@ class MySqlRepository:
         params: list[Any] = []
         for term in like_terms:
             params.extend([f"%{escape_like(term)}%", like_term_weight(term)])
+        for term in metadata_terms:
+            params.extend([f"%{escape_like(term)}%", metadata_like_term_weight(term)])
         params.extend([scope.tenant_id, scope.kb_id])
         params.extend([f"%{escape_like(term)}%" for term in like_terms])
+        params.extend([f"%{escape_like(term)}%" for term in metadata_terms])
         filter_sql, filter_params = metadata_filter_clause(metadata_filter)
         sql += filter_sql
         sql += " ORDER BY keyword_score DESC, updated_at DESC LIMIT %s"
@@ -740,9 +756,31 @@ def chunk_row(scope: KnowledgeBaseScope, doc_id: str, chunk: dict[str, Any]) -> 
     )
 
 
-def batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+def batched(items: list[dict[str, Any]], batch_size: int) -> Iterator[list[dict[str, Any]]]:
     size = max(int(batch_size), 1)
-    return [items[start:start + size] for start in range(0, len(items), size)]
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def should_run_like_fallback(fulltext_rows: list[dict[str, Any]], top_k: int, settings: Settings) -> bool:
+    if not settings.mysql_keyword_like_fallback_enabled:
+        return False
+    fulltext_hit_count = len(fulltext_rows)
+    if fulltext_hit_count <= 0:
+        return True
+    configured_threshold = int(settings.mysql_keyword_like_fallback_min_fulltext_hits or 0)
+    enough_hit_threshold = top_k if configured_threshold <= 0 else min(configured_threshold, top_k)
+    return fulltext_hit_count < max(enough_hit_threshold, 1)
+
+
+def keyword_metadata_like_expression() -> str:
+    fields = [
+        "file_name",
+        "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.\"section_title\"'))",
+        "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.\"section_path\"'))",
+        "JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.\"keywords\"'))",
+    ]
+    return f"CONCAT_WS(' ', {', '.join(fields)})"
 
 
 def metadata_filter_clause(metadata_filter: dict[str, Any] | None) -> tuple[str, list[Any]]:
@@ -819,6 +857,10 @@ def like_term_weight(term: str) -> int:
     if compact_length >= 4:
         return 3
     return 1
+
+
+def metadata_like_term_weight(term: str) -> int:
+    return like_term_weight(term) + 2
 
 
 def json_path_key(key: str) -> str:

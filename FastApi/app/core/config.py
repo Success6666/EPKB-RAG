@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Enterprise Private Knowledge Base RAG"
-    app_version: str = "0.1.8"
+    app_version: str = "0.1.9"
     app_env: str = "dev"
     api_prefix: str = "/api/v1"
     internal_api_token: str | None = None
@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     vector_weight: float = 0.7
     keyword_weight: float = 0.3
     retrieval_candidate_multiplier: int = 4
+    retrieval_multi_kb_max_concurrency: int = 1
     hybrid_query_expansion_enabled: bool = True
     hybrid_query_expansion_max_queries: int = 3
     metadata_boost_enabled: bool = True
@@ -126,6 +127,9 @@ class Settings(BaseSettings):
     mysql_ingest_insert_batch_size: int = 500
     mysql_keyword_fulltext_enabled: bool = True
     mysql_keyword_like_fallback_enabled: bool = True
+    mysql_keyword_like_fallback_min_fulltext_hits: int = 0
+    mysql_keyword_metadata_like_enabled: bool = True
+    mysql_keyword_metadata_like_max_terms: int = 8
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/%2F"
     rabbitmq_queue: str = "rag.document.ingest"

@@ -37,7 +37,7 @@ class IngestionBatchingTests(unittest.TestCase):
             [items[:2], items[2:4], items[4:]],
         )
         self.assertEqual(
-            mysql_batches(items, 3),
+            list(mysql_batches(items, 3)),
             [items[:3], items[3:]],
         )
 

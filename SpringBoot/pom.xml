@@ -13,7 +13,7 @@
 
     <groupId>com.example</groupId>
     <artifactId>enterprise-rag-platform</artifactId>
-    <version>0.1.8</version>
+    <version>0.1.9</version>
     <name>enterprise-rag-platform</name>
     <description>Multi-tenant enterprise private knowledge base RAG platform skeleton</description>
 

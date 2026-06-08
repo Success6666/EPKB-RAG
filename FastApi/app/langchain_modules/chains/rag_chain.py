@@ -80,18 +80,23 @@ class HybridRetrievalService:
         temperature: float | None = None,
         top_p: float | None = None,
         expand_full_document_context: bool = True,
+        retrieval_query_override: str | None = None,
+        rerank_hits: bool = True,
     ) -> RetrievalResponse:
         scope = KnowledgeBaseScope(tenant_id=request.tenant_id, kb_id=request.kb_id)
         child_filter = {**request.metadata_filter, "chunk_type": "child"}
         vector_store = self._vector_store_for_request(request)
-        retrieval_query = await self._maybe_rewrite_query(
-            request.query,
-            request.history,
-            provider,
-            model,
-            base_url,
-            api_key,
-        )
+        if retrieval_query_override is None:
+            retrieval_query = await self._maybe_rewrite_query(
+                request.query,
+                request.history,
+                provider,
+                model,
+                base_url,
+                api_key,
+            )
+        else:
+            retrieval_query = retrieval_query_override
         expansion_max_queries = self.settings.hybrid_query_expansion_max_queries if self.settings.hybrid_query_expansion_enabled else 1
         search_queries = expanded_search_queries(request.query, retrieval_query, expansion_max_queries)
         candidate_top_k = retrieval_candidate_top_k(request.top_k, self.settings)
@@ -143,14 +148,20 @@ class HybridRetrievalService:
             request.metadata_filter,
             parent_candidate_top_k(request.top_k, self.settings),
         )
-        hits, rerank_ms = await self._rerank_hits(
-            request.query,
-            hits,
-            max(request.top_k * self.settings.child_chunks_per_parent, request.top_k),
-            rerank_model=effective_rerank_model,
-            rerank_base_url=effective_rerank_base_url,
-            rerank_api_key=effective_rerank_api_key,
-        )
+        hit_limit = max(request.top_k * self.settings.child_chunks_per_parent, request.top_k)
+        if rerank_hits:
+            hits, rerank_ms = await self._rerank_hits(
+                request.query,
+                hits,
+                hit_limit,
+                rerank_model=effective_rerank_model,
+                rerank_base_url=effective_rerank_base_url,
+                rerank_api_key=effective_rerank_api_key,
+            )
+        else:
+            candidate_limit = cross_kb_candidate_top_k(request.top_k, self.settings)
+            hits = sorted(hits, key=lambda item: item.score, reverse=True)[:candidate_limit]
+            rerank_ms = 0
         threshold = request.score_threshold if request.score_threshold is not None else self.settings.hallucination_min_score
         trusted_hits = [hit for hit in hits if hit.score >= threshold]
         if expand_full_document_context:
@@ -220,29 +231,49 @@ class HybridRetrievalService:
         effective_rerank_model = rerank_model if rerank_model is not None else request.rerank_model
         effective_rerank_base_url = rerank_base_url if rerank_base_url is not None else request.rerank_base_url
         effective_rerank_api_key = rerank_api_key if rerank_api_key is not None else request.rerank_api_key
+        retrieval_query = await self._maybe_rewrite_query(
+            request.query,
+            request.history,
+            provider,
+            model,
+            base_url,
+            api_key,
+        )
+        max_concurrency = max(1, int(self.settings.retrieval_multi_kb_max_concurrency))
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def retrieve_scoped(kb_id: str) -> RetrievalResponse:
+            scoped_request = request.model_copy(update={"kb_id": kb_id, "include_answer": False})
+            async with semaphore:
+                return await self.retrieve(
+                    scoped_request,
+                    provider=provider,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    rerank_model=effective_rerank_model,
+                    rerank_base_url=effective_rerank_base_url,
+                    rerank_api_key=effective_rerank_api_key,
+                    temperature=temperature,
+                    top_p=top_p,
+                    expand_full_document_context=False,
+                    retrieval_query_override=retrieval_query,
+                    rerank_hits=False,
+                )
+
         hits: list[RetrievalHit] = []
         warnings: list[str] = []
         rerank_ms = 0
-        for kb_id in scoped_ids:
-            scoped_request = request.model_copy(update={"kb_id": kb_id, "include_answer": False})
-            response = await self.retrieve(
-                scoped_request,
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                rerank_model=effective_rerank_model,
-                rerank_base_url=effective_rerank_base_url,
-                rerank_api_key=effective_rerank_api_key,
-                temperature=temperature,
-                top_p=top_p,
-                expand_full_document_context=False,
-            )
+        if max_concurrency == 1:
+            responses = [await retrieve_scoped(kb_id) for kb_id in scoped_ids]
+        else:
+            responses = await asyncio.gather(*(retrieve_scoped(kb_id) for kb_id in scoped_ids))
+        for response in responses:
             hits.extend(response.hits)
             warnings.extend(response.warnings)
             rerank_ms += response.rerank_ms
 
-        merged_hits = dedupe_hits(hits, max(request.top_k * self.settings.child_chunks_per_parent, request.top_k))
+        merged_hits = dedupe_hits(hits, cross_kb_candidate_top_k(request.top_k, self.settings))
         scopes_by_kb_id = {kb_id: KnowledgeBaseScope(tenant_id=request.tenant_id, kb_id=kb_id) for kb_id in scoped_ids}
         merged_hits, cross_kb_rerank_ms = await self._rerank_hits(
             request.query,
@@ -718,6 +749,12 @@ def retrieval_candidate_top_k(top_k: int, settings: Settings) -> int:
     multiplied = child_top_k * max(settings.retrieval_candidate_multiplier, 1)
     rerank_floor = settings.rerank_top_n if settings.rerank_enabled else 0
     return max(child_top_k, multiplied, rerank_floor)
+
+
+def cross_kb_candidate_top_k(top_k: int, settings: Settings) -> int:
+    base = max(top_k * max(settings.child_chunks_per_parent, 1), top_k)
+    rerank_floor = settings.rerank_top_n if settings.rerank_enabled else 0
+    return max(base, rerank_floor)
 
 
 def parent_candidate_top_k(top_k: int, settings: Settings) -> int:
